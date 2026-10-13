@@ -1,0 +1,15 @@
+{
+  "name": "agent-map",
+  "owner": {
+    "name": "Hillman Chan",
+    "url": "https://github.com/ChiFungHillmanChan"
+  },
+  "description": "Agent Map, a Claude Code mod: one pane for every session on your computer and the agents each one started.",
+  "plugins": [
+    {
+      "name": "agent-map",
+      "source": "./",
+      "description": "Every Claude Code session on this computer and what each one started, what needs you or may be stuck, with a Peek on any of them."
+    }
+  ]
+}

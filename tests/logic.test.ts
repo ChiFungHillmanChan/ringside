@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { agentFromMarkdown, filterCatalog, pruneCards, roleOf, skillsFrom } from '../hooks/agents'
+import { agentFromMarkdown, catalogSections, dotColor, filterCatalog, mergeOffer, pruneCards, roleOf, skillsFrom } from '../hooks/agents'
 import { bareMembers, readHub, resolveRecipient, unread } from '../hooks/hub'
 import type { HubFile } from '../hooks/hub'
 import { addCron, addWakeup, endLoop, fired, humanCron, nextFire, reconcile } from '../hooks/loops'
@@ -163,4 +163,26 @@ test('wraps text over lines at spaces, cutting the last', () => {
   expect(wrap('Find where the session token is validated', 20, 2)).toEqual(['Find where the', 'session token is va…'])
   expect(wrap('short', 20, 2)).toEqual(['short'])
   expect(wrap('一二三四五六七八九十', 8, 2)).toEqual(['一二三四', '五六七…'])
+})
+
+test('an agent file names its model and colour; the launcher groups types by where they come from', () => {
+  const md = '---\nname: perf-profiler\ndescription: Looks for the slow parts.\nmodel: claude-sonnet-5-5\ncolor: Orange\n---\nYou profile.'
+  const file = agentFromMarkdown(md, 'x', 'projectSettings')
+  expect(file).toEqual({ kind: 'agent', name: 'perf-profiler', description: 'Looks for the slow parts.', source: 'projectSettings', model: 'sonnet', color: 'orange' })
+  expect(agentFromMarkdown('---\nname: a\nmodel: inherit\n---\n', 'x', 'u')).toEqual({ kind: 'agent', name: 'a', description: '', source: 'u' })
+  // The engine's offer carries neither: what the file said stays.
+  const merged = mergeOffer([file as CatalogEntry], { agent: 'perf-profiler', description: 'Looks for the slow parts.', source: 'projectSettings' })
+  expect(merged[0]?.model).toBe('sonnet')
+  expect(dotColor(file as CatalogEntry)).toBe('#d7875f')
+  expect(dotColor({ kind: 'agent', name: 'x', description: '', source: 'u' })).toMatch(/^#[0-9a-f]{6}$/)
+  const list: CatalogEntry[] = [
+    { kind: 'agent', name: 'Explore', description: '', source: 'built-in' },
+    { kind: 'agent', name: 'mine', description: '', source: 'userSettings' },
+    { kind: 'agent', name: 'odd', description: '', source: 'flagSettings' },
+    { kind: 'agent', name: 'savvy:careful', description: '', source: 'plugin' },
+    { kind: 'agent', name: 'perf-profiler', description: '', source: 'projectSettings' },
+  ]
+  expect(catalogSections(list).map(s => [s.label, s.entries.map(e => e.name)])).toEqual([
+    ['PROJECT', ['perf-profiler']], ['YOURS', ['mine']], ['PLUGINS', ['savvy:careful']], ['BUILT-IN', ['Explore']], ['OTHER', ['odd']],
+  ])
 })

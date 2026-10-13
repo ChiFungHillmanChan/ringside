@@ -2,10 +2,10 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type {
-  AgentCard, AgentRow, CatalogEntry, FleetFile, Goal, Hub, HubMessage, HubState, Job, Launch, Loop, MainState, Need, Peek, PeekLine, SessionRow, Task, View,
+  AgentCard, AgentRow, CatalogEntry, FleetFile, Goal, Hub, HubMessage, HubState, Job, JumpNote, Launch, Loop, MainState, Need, Peek, PeekLine, SessionRow, Task, View,
 } from '../types'
 import {
-  addCard, adoptCards, agentFromMarkdown, callerOf, filterCatalog, finishCard, mergeOffer, newCard, noteStep, PENDING_ID, pruneCards, purposeOf,
+  addCard, adoptCards, agentFromMarkdown, callerOf, catalogSections, dotColor, filterCatalog, finishCard, mergeOffer, newCard, noteStep, PENDING_ID, pruneCards, purposeOf,
   replaceSkills, roleFor, skillsFrom, typeOf,
 } from './agents'
 import { asHubFile, bareMembers, HUB_STALE_MS, hubDir, hubNote, hubReport, newMessage, NODES_MAX, pushOutbox, readHub, resolveRecipient, unread } from './hub'
@@ -33,8 +33,10 @@ const SHOWN_RUNNING = 8
 const SHOWN_ENDED = 4
 const SHOWN_LIVE_AGENTS = 6
 const SHOWN_ENDED_AGENTS = 4
-const SHOWN_TASKS = 8
-const SHOWN_LAUNCH = 8
+const SHOWN_TASKS = 60
+const SHOWN_LAUNCH = 12
+// A background session done or blocked for longer than this: no longer listed on the map.
+const BACKGROUND_DONE_KEEP_MS = 24 * 60 * 60 * 1000
 const SHOWN_MESSAGES = 6
 const BACKGROUND_EXPIRY_MS = 3 * 60 * 60 * 1000
 const HEARTBEAT_TICKS = 10
@@ -514,13 +516,15 @@ async function focusTmux($: EngineInterface, tty: string): Promise<string> {
 }
 
 // Brings another session's terminal forward: Terminal or iTerm2 by its tty, a tmux pane, or
-// `claude attach` for a background session. Says so in a toast when it cannot.
+// `claude attach` for a background session. What it did shows in that session's card; a
+// failure is also a toast, for a jump pressed from NEEDS YOU.
 async function jumpTo($: EngineInterface, sessionId: string): Promise<void> {
   const row = (await sessionRowsNow($)).find(r => r.sessionId === sessionId)
   if (row?.isSelf === true) {
     $.ui.toast('That is this session.', { timeoutMs: 3_000 })
     return
   }
+  await update($, viewAtom, v => ({ ...v, jump: { sessionId, at: 0, isOk: true, text: 'Bringing it forward…' } }))
   let result = 'none'
   if (row !== undefined && row.jobId !== null) {
     result = await osa($, OPEN_TERMINAL, [`claude attach ${row.jobId}`])
@@ -531,9 +535,29 @@ async function jumpTo($: EngineInterface, sessionId: string): Promise<void> {
       if (viaTmux === 'ok' || result === 'none') result = viaTmux
     }
   }
-  if (result === 'ok') return
-  const why = result.startsWith('error:') ? ` (${fit(result.slice(7), 60)})` : row === undefined || row.tty === null ? ' (no terminal is known for it)' : ''
-  $.ui.toast(fit(`Could not bring ${row?.name || 'that session'} forward${why}`, 160), { timeoutMs: 8_000 })
+  const at = await $.clock.now()
+  const name = row?.name || 'that session'
+  const why = result.startsWith('error:') ? `: ${fit(result.slice(7), 160)}`
+    : row === undefined ? ': it is no longer in the session list'
+      : row.jobId === null && row.tty === null ? ': no terminal is known for it'
+        : ': its terminal window was not found (Terminal, iTerm2 and tmux were checked)'
+  const note: JumpNote = result === 'ok'
+    ? { sessionId, at, isOk: true, text: row?.jobId != null ? `Opened ${name} in a new Terminal window` : `Switched to ${name}'s terminal (${(row?.tty ?? '').replace('/dev/', '')})` }
+    : { sessionId, at, isOk: false, text: `Could not bring ${name} forward${why}` }
+  await update($, viewAtom, v => ({ ...v, jump: note }))
+  if (!note.isOk) $.ui.toast(fit(note.text, 160), { timeoutMs: 8_000 })
+}
+
+// A press runs only as long as the drawing it was pressed on: the pane redraws (a spinner, the
+// jump's own note) and aborts what the press still waits on, osascript included. So the jump runs
+// on a timer of its own, outside the press.
+function startJump($: EngineInterface, sessionId: string): void {
+  $.clock.after(0, () => {
+    void jumpTo($, sessionId).catch(async (err: unknown) => {
+      const at = await $.clock.now()
+      await update($, viewAtom, v => ({ ...v, jump: { sessionId, at, isOk: false, text: `Could not bring it forward: ${fit(oneLine(String(err)), 120)}` } }))
+    })
+  })
 }
 
 type MessageLike = {
@@ -786,7 +810,9 @@ async function refreshFleet($: EngineInterface, now: number): Promise<void> {
 
 // The whole map as it stands: this session, every other one, what each started.
 async function currentMap($: EngineInterface, now: number): Promise<MapSession[]> {
-  const rows = (await sessionRowsNow($)).map(r => ({
+  // A background session that ended, or has sat blocked, for over a day is history, not something to look at now.
+  const live = (await sessionRowsNow($)).filter(r => !(r.jobId !== null && r.group !== 'working' && now - r.since > BACKGROUND_DONE_KEEP_MS))
+  const rows = live.map(r => ({
     sessionId: r.sessionId, name: r.name, cwd: r.cwd, group: r.group, state: r.state, since: r.since, summary: r.summary, isSelf: r.isSelf,
     usage: r.usage === null ? null : { contextPercent: r.usage.contextPercent, costUsd: r.usage.costUsd },
   }))
@@ -930,7 +956,9 @@ async function seedAgentFiles($: EngineInterface, claudeDir: string, root: strin
     }
   }
   if (found.length === 0) return
-  await update($, catalogAtom, l => found.reduce((acc, a) => mergeOffer(acc, { agent: a.name, description: a.description, source: a.source }), l))
+  await update($, catalogAtom, l => found.reduce((acc, a) => mergeOffer(acc, {
+    agent: a.name, description: a.description, source: a.source, ...(a.model === undefined ? {} : { model: a.model }), ...(a.color === undefined ? {} : { color: a.color }),
+  }), l))
 }
 
 async function launchAgent($: EngineInterface, type: string, task: string): Promise<void> {
@@ -1293,6 +1321,9 @@ export const register: Register = on => {
 
     const map = await currentMap($, now)
     const self = map[0]
+    // How each session is reached (its terminal, or a background job), for its opened card.
+    const rowsNow = await sessionRowsNow($)
+    const homeDir = (await $.env.get('HOME')) ?? ''
     const views = agentViews(agentList, cardList, jobList)
     const groups = groupNow(jobList, agentList, m0)
 
@@ -1302,10 +1333,10 @@ export const register: Register = on => {
         <Text dimColor>{right === '' ? '' : `  ${right}`}</Text>
       </Box>
     )
-    // A labelled detail line: "   role  Read-only search…", wrapped.
-    const detail = (key: string, label: string, text: string, lines: number, color?: string) => {
+    // A labelled detail line: "   role  Read-only search…", wrapped; inside a card, to the card's width.
+    const detail = (key: string, label: string, text: string, lines: number, color?: string, w = width) => {
       const indent = `   ${label === '' ? '' : `${label.padEnd(5)} `}`
-      return wrap(m(text), width - indent.length, lines).map((line, i) => (
+      return wrap(m(text), w - indent.length, lines).map((line, i) => (
         <Box key={`${key}:${i}`}>
           <Text dimColor>{i === 0 ? indent : ' '.repeat(indent.length)}</Text>
           <Text color={color} dimColor={color === undefined}>{line}</Text>
@@ -1370,7 +1401,7 @@ export const register: Register = on => {
         color: n.kind === 'wait' ? 'yellow' : STUCK_COLOR,
         text: `${n.where}: ${n.why}`,
         from: n.since,
-        onPress: node !== undefined ? () => openNode(s, node) : !s.isSelf ? () => jumpTo($, s.sessionId) : () => openSession(s),
+        onPress: node !== undefined ? () => openNode(s, node) : !s.isSelf ? async () => startJump($, s.sessionId) : () => openSession(s),
       })
     }
     const needRow = (r: NeedRow) => {
@@ -1391,17 +1422,35 @@ export const register: Register = on => {
       )
     }
 
-    // ---- the tabs ----
+    // ---- the tabs: three cards, the one shown in the accent colour ----
     const done = g.tasks.filter(t => t.status === 'completed').length
     const total = g.tasks.length
-    const tab = (id: View['tab'], label: string) => (view.tab === id
-      ? <Button key={`tab:${id}`} variant="primary" label={label} onPress={setView({ tab: id, confirm: null })} />
-      : <Button key={`tab:${id}`} plain dimColor label={label} onPress={setView({ tab: id, confirm: null })} />)
+    const agentCount = catalogList.filter(c => c.kind === 'agent').length
+    const skillCount = catalogList.filter(c => c.kind === 'skill').length
+    const tabW = Math.max(10, Math.floor((width - 2) / 3))
+    // `long` when it fits the card, else `short`, else the name alone.
+    const tabCard = (id: View['tab'], name: string, long: string, short: string, color?: string) => {
+      const isOn = view.tab === id
+      const inner = tabW - 4
+      const extra = [long, short].find(x => x !== '' && cellWidth(name) + 1 + cellWidth(x) <= inner) ?? ''
+      const pad = ' '.repeat(Math.max(0, inner - cellWidth(name) - (extra === '' ? 0 : cellWidth(extra) + 1)))
+      return (
+        <Box key={`tabcard:${id}`} width={tabW} borderStyle="round" borderColor={isOn ? 'claude' : 'gray'} borderDimColor={!isOn} hover={{ borderColor: 'claude', borderDimColor: false }} paddingX={1}>
+          <Button key={`tab:${id}`} plain label={name} onPress={setView({ tab: id, confirm: null })}>
+            <Text bold color={isOn ? 'claude' : undefined}>{name}</Text>
+            {extra === '' ? '' : <Text color={color} dimColor={color === undefined}>{` ${extra}`}</Text>}
+            {pad}
+          </Button>
+        </Box>
+      )
+    }
     const tabs = (
       <Box gap={1}>
-        {tab('map', needRows.length > 0 ? `Map ${needRows.length}!` : 'Map')}
-        {tab('tasks', total === 0 ? 'Tasks' : `Tasks ${done}/${total}`)}
-        {tab('launch', 'Launch')}
+        {needRows.length > 0
+          ? tabCard('map', 'Map', `${needRows.length} need you`, `${needRows.length}!`, 'yellow')
+          : tabCard('map', 'Map', `${map.length} session${map.length === 1 ? '' : 's'}`, String(map.length))}
+        {tabCard('tasks', 'Tasks', total === 0 ? '' : `${done}/${total} done`, total === 0 ? '' : `${done}/${total}`, total > 0 && done === total ? 'green' : undefined)}
+        {tabCard('launch', 'Launch', `${agentCount} agents`, String(agentCount))}
       </Box>
     )
 
@@ -1420,7 +1469,14 @@ export const register: Register = on => {
     const zoom: Zoom = isDesktopGraph ? 'lines' : view.zoom === 'auto' ? autoZoom(active, needRows.length + quiet.length, bodyRows - (isPeekOpen ? 16 : 0)) : view.zoom
 
     const sessionTitle = (s: MapSession): string =>
-      `${s.name}${s.branch === '' ? '' : ` · ${s.branch}`}${s.isSelf ? ' · here' : ''}${s.hasMap ? '' : ' · (no map)'}`
+      `${s.name}${s.branch === '' ? '' : ` · ${s.branch}`}${s.isSelf ? ' · here' : ''}`
+    // The session whose block holds what is opened, so it opens right under it, not at the map's end.
+    const openSid: string | null = peekState.agentId !== null
+      ? (self !== undefined && self.nodes.some(n => n.id === peekState.agentId) ? self.sessionId : null)
+      : view.sel === null ? null
+        : view.sel.startsWith('session:') ? (map.some(s => `session:${s.sessionId}` === view.sel) ? view.sel.slice('session:'.length) : null)
+          : map.find(s => s.nodes.some(n => view.sel === `node:${s.sessionId}:${n.id}`))?.sessionId ?? null
+    const openedIn = (s: MapSession) => (openSid === s.sessionId ? opened() : null)
     const sessionLine = (s: MapSession): string => s.status === 'waiting' || s.status === 'stuck' ? s.why || s.doing : s.doing
 
     const card = (s: MapSession) => {
@@ -1444,6 +1500,7 @@ export const register: Register = on => {
               {kids.map((n, i) => nodeCard(s, n, i === kids.length - 1))}
             </Box>
           )}
+          {openedIn(s)}
         </Box>
       )
     }
@@ -1493,15 +1550,26 @@ export const register: Register = on => {
       <Box key={`lines:${s.sessionId}`} flexDirection="column">
         {lineRow(s, null, '')}
         {s.nodes.map((n, i) => lineRow(s, n, i === s.nodes.length - 1 ? '└─▸ ' : '├─▸ '))}
+        {openedIn(s)}
       </Box>
     )
     const dots = (s: MapSession) => (
-      <Box key={`dots:${s.sessionId}`} gap={1}>
-        <Text color={colorOf(s.status, 'session')}>{glyphOf(s.status, 'session')}</Text>
-        <Button key={`session:${s.sessionId}`} plain label={padEnd(fit(m(s.name), 16), 16)} onPress={() => openSession(s)} />
-        {s.nodes.slice(0, Math.max(1, Math.floor((width - 21) / 2))).map(n => (
-          <Button key={nodeKey(s, n)} plain label={glyphOf(n.status, n.kind)} onPress={() => openNode(s, n)} />
-        ))}
+      <Box key={`dotsrow:${s.sessionId}`} flexDirection="column">
+        <Box key={`dots:${s.sessionId}`} gap={1}>
+          <Text color={colorOf(s.status, 'session')}>{glyphOf(s.status, 'session')}</Text>
+          <Button key={`session:${s.sessionId}`} plain label={padEnd(fit(m(s.name), 16), 16)} onPress={() => openSession(s)} />
+          {s.nodes.slice(0, Math.max(1, Math.floor((width - 21) / 2))).map(n => (
+            <Button key={nodeKey(s, n)} plain label={glyphOf(n.status, n.kind)} onPress={() => openNode(s, n)} />
+          ))}
+        </Box>
+        {openedIn(s)}
+      </Box>
+    )
+    // An idle session folded into one line; opened, its card follows the line.
+    const quietRow = (s: MapSession) => (
+      <Box key={`quiet:${s.sessionId}`} flexDirection="column">
+        {zoom === 'dots' ? dots(s) : lineRow(s, null, '')}
+        {zoom === 'dots' ? null : openedIn(s)}
       </Box>
     )
 
@@ -1514,6 +1582,13 @@ export const register: Register = on => {
         }} />
       </Box>
     )
+    // What is opened is a card of its own, its border in the colour of what it is.
+    const peekW = width - 4
+    const peekCard = (key: string, color: string, children: unknown[]) => (
+      <Box key={`peek:${key}`} flexDirection="column" borderStyle="round" borderColor={color} paddingX={1} marginLeft={0}>
+        {children as never}
+      </Box>
+    )
     const agentPeek = () => {
       const agentId = peekState.agentId
       if (agentId === null) return null
@@ -1522,57 +1597,72 @@ export const register: Register = on => {
       const n = self?.nodes.find(x => x.id === agentId)
       const by = c === null ? '' : [`by ${c.calledBy}`, c.model, `${c.calls} call${c.calls === 1 ? '' : 's'}`, c.isBackground ? 'background' : ''].filter(x => x !== '').join(' · ')
       const extra = n === undefined ? '' : [n.costUsd === null ? '' : `~$${n.costUsd.toFixed(2)}`, n.tokens === null ? '' : `context ${Math.round(n.tokens / 1000)}k`].filter(x => x !== '').join(' · ')
-      return (
-        <Box flexDirection="column" marginTop={1}>
-          <Box>
-            <Text bold color="magenta">AGENT</Text>
-            <Text>{`  ${fit(m(v === undefined ? 'subagent' : `${v.type} · ${v.purpose}`), width - 7)}`}</Text>
+      return peekCard(`agent:${agentId}`, 'magenta', [
+        <Box key={`agent-head:${agentId}`}>
+          <Text bold color="magenta">AGENT</Text>
+          <Text bold>{`  ${fit(m(v === undefined ? 'subagent' : `${v.type} · ${v.purpose}`), peekW - 7)}`}</Text>
+        </Box>,
+        n !== undefined && (n.status === 'waiting' || n.status === 'stuck') && detail(`why:${agentId}`, n.status === 'waiting' ? 'waits' : 'stuck', n.why, 2, n.status === 'waiting' ? 'yellow' : STUCK_COLOR, peekW),
+        c !== null && c.role !== '' && detail(`role:${agentId}`, 'role', c.role, 2, undefined, peekW),
+        (c?.task || peekState.task) !== '' && detail(`task:${agentId}`, 'task', c?.task || peekState.task, 2, 'white', peekW),
+        n !== undefined && n.now !== '' && detail(`now:${agentId}`, 'now', n.now, 1, 'cyan', peekW),
+        n !== undefined && n.raw !== '' && n.status !== 'done' && n.status !== 'failed' && detail(`raw:${agentId}`, 'tool', n.raw, 1, undefined, peekW),
+        n !== undefined && n.progress !== null && detail(`prog:${agentId}`, 'steps', `${bar(n.progress)}${n.progress.note === '' ? '' : ` · ${n.progress.note}`} (savvy-progress)`, 1, 'magenta', peekW),
+        by !== '' && detail(`by:${agentId}`, '', by, 1, undefined, peekW),
+        extra !== '' && detail(`cost:${agentId}`, '', extra, 1, undefined, peekW),
+        peekState.error !== '' && <Text key={`agent-err:${agentId}`} color="red">{fit(peekState.error, peekW)}</Text>,
+        ...peekState.lines.map((l, i) => (
+          <Box key={`step:${agentId}:${i}`}>
+            <Text color={PEEK_COLOR[l.kind]}>{l.kind === 'running' ? spin : PEEK_GLYPH[l.kind]} </Text>
+            <Text dimColor={l.kind === 'done'}>{fit(m(l.text), peekW - 2)}</Text>
           </Box>
-          {n !== undefined && (n.status === 'waiting' || n.status === 'stuck') && detail(`why:${agentId}`, n.status === 'waiting' ? 'waits' : 'stuck', n.why, 2, n.status === 'waiting' ? 'yellow' : STUCK_COLOR)}
-          {c !== null && c.role !== '' && detail(`role:${agentId}`, 'role', c.role, 2)}
-          {(c?.task || peekState.task) !== '' && detail(`task:${agentId}`, 'task', c?.task || peekState.task, 2, 'white')}
-          {n !== undefined && n.now !== '' && detail(`now:${agentId}`, 'now', n.now, 1, 'cyan')}
-          {n !== undefined && n.raw !== '' && n.status !== 'done' && n.status !== 'failed' && detail(`raw:${agentId}`, 'tool', n.raw, 1)}
-          {n !== undefined && n.progress !== null && detail(`prog:${agentId}`, 'steps', `${bar(n.progress)}${n.progress.note === '' ? '' : ` · ${n.progress.note}`} (savvy-progress)`, 1, 'magenta')}
-          {by !== '' && detail(`by:${agentId}`, '', by, 1)}
-          {extra !== '' && detail(`cost:${agentId}`, '', extra, 1)}
-          {peekState.error !== '' && <Text color="red">{fit(peekState.error, width)}</Text>}
-          {peekState.lines.map((l, i) => (
-            <Box key={`step:${agentId}:${i}`}>
-              <Text color={PEEK_COLOR[l.kind]}>{l.kind === 'running' ? spin : PEEK_GLYPH[l.kind]} </Text>
-              <Text dimColor={l.kind === 'done'}>{fit(m(l.text), width - 2)}</Text>
-            </Box>
-          ))}
-          {c !== null && c.result !== '' && detail(`result:${agentId}`, '→', c.result, 3)}
-          {c !== null && c.result !== '' && (
-            <Box gap={1}>
-              <Text>{'   '}</Text>
-              <Button key={`use:${agentId}`} plain label="[use in prompt]" onPress={() => useResult($, c)} />
-            </Box>
-          )}
-          {closeRow}
-        </Box>
-      )
+        )),
+        c !== null && c.result !== '' && detail(`result:${agentId}`, '→', c.result, 3, undefined, peekW),
+        c !== null && c.result !== '' && (
+          <Box key={`agent-use:${agentId}`} gap={1}>
+            <Text>{'   '}</Text>
+            <Button key={`use:${agentId}`} plain label="[use in prompt]" onPress={() => useResult($, c)} />
+          </Box>
+        ),
+        closeRow,
+      ])
     }
     const sessionPeek = (s: MapSession) => {
       const usage = [s.contextPercent === null ? '' : `context ${Math.round(s.contextPercent)}%`, s.costUsd === null ? '' : `$${s.costUsd.toFixed(2)}`].filter(x => x !== '').join(' · ')
       const others = hb.members.filter(x => !x.isSelf)
       const toMember = hb.members.find(x => x.sessionId === hb.to && !x.isSelf)
+      const row = rowsNow.find(r => r.sessionId === s.sessionId)
+      const folder = homeDir !== '' && s.cwd.startsWith(homeDir) ? `~${s.cwd.slice(homeDir.length)}` : s.cwd
+      const terminal = row === undefined ? '' : row.jobId !== null ? 'background session · opens with claude attach' : row.tty === null ? 'no terminal known' : row.tty.replace('/dev/', '')
+      const said = sessionLine(s)
+      const tone = s.status === 'waiting' ? 'yellow' : s.status === 'stuck' ? STUCK_COLOR : s.status === 'running' ? 'cyan' : 'gray'
+      const jump = view.jump != null && view.jump.sessionId === s.sessionId && (view.jump.at === 0 || now - view.jump.at < 60_000) ? view.jump : null
+      const runs = s.nodes.length > 0 ? s.nodes.map(n => n.title.split(' · ')[0]).join(', ')
+        : s.hasMap ? 'nothing started'
+          : 'not shared: that session does not run Agent Map yet (a session started now will)'
       return (
-        <Box flexDirection="column" marginTop={1}>
+        <Box key={`peek:session:${s.sessionId}`} flexDirection="column" borderStyle="round" borderColor={s.isSelf ? 'claude' : tone === 'gray' ? 'blue' : tone} paddingX={1}>
           <Box>
-            <Text bold color="blue">SESSION</Text>
-            <Text>{`  ${fit(m(sessionTitle(s)), width - 9)}`}</Text>
+            <Text color={colorOf(s.status, 'session')}>{`${glyphOf(s.status, 'session')} `}</Text>
+            <Text bold>{fit(m(sessionTitle(s)), peekW - 2)}</Text>
           </Box>
-          {detail(`where:${s.sessionId}`, 'where', s.cwd, 1)}
-          {detail(`state:${s.sessionId}`, 'state', `${STATUS_WORD[s.status]}${sessionLine(s) === '' ? '' : ` · ${sessionLine(s)}`}`, 3, s.status === 'waiting' ? 'yellow' : s.status === 'stuck' ? STUCK_COLOR : undefined)}
-          {usage !== '' && detail(`usage:${s.sessionId}`, 'usage', usage, 1)}
-          {detail(`nodes:${s.sessionId}`, 'runs', s.nodes.length === 0 ? (s.hasMap ? 'nothing started' : 'no map from that session (it does not run Agent Map)') : s.nodes.map(n => n.title.split(' · ')[0]).join(', '), 2)}
+          <Text color={tone === 'gray' ? undefined : tone} dimColor={tone === 'gray'}>{fit(`${STATUS_WORD[s.status]} · ${dur(now - s.since)}`, peekW)}</Text>
+          {said !== '' && wrap(m(said), peekW, 3).map((l, i) => <Text key={`said:${s.sessionId}:${i}`}>{l}</Text>)}
+          <Box flexDirection="column" marginTop={1}>
+            {detail(`where:${s.sessionId}`, 'where', folder, 1, undefined, peekW)}
+            {terminal !== '' && !s.isSelf && detail(`tty:${s.sessionId}`, 'term', terminal, 1, undefined, peekW)}
+            {usage !== '' && detail(`usage:${s.sessionId}`, 'usage', usage, 1, undefined, peekW)}
+            {detail(`nodes:${s.sessionId}`, 'runs', runs, 2, undefined, peekW)}
+          </Box>
           {!s.isSelf && (
             <Box gap={1} marginTop={1}>
-              <Button key={`jump:${s.sessionId}`} label="Jump there" variant="primary" onPress={() => jumpTo($, s.sessionId)} />
+              <Button key={`jump:${s.sessionId}`} label={row?.jobId != null ? 'Open in Terminal' : 'Jump there'} variant="primary" autoFocus onPress={() => startJump($, s.sessionId)} />
+              <Text dimColor>{fit(row?.jobId != null ? 'claude attach in a new window' : 'brings its terminal window to the front', Math.max(0, peekW - 16))}</Text>
             </Box>
           )}
+          {jump !== null && wrap(`${jump.at === 0 ? spin : jump.isOk ? '✓' : '✗'} ${m(jump.text)}${jump.at === 0 ? '' : ` · ${clockOf(jump.at)}`}`, peekW, 4).map((l, i) => (
+            <Text key={`jumped:${s.sessionId}:${i}`} color={jump.at === 0 ? 'cyan' : jump.isOk ? 'green' : 'red'}>{i === 0 ? l : `  ${l}`}</Text>
+          ))}
           {s.isSelf && hasReplay && (
             <Box gap={1} marginTop={1}>
               <Button key="replay" plain label="[replay the last turn's edits]" onPress={async () => {
@@ -1584,11 +1674,11 @@ export const register: Register = on => {
           )}
           {/* A pane cannot take the keys from one the person is pressing in, so Replay Theater opens as a tab behind. */}
           {s.isSelf && hasReplay && view.replayAt != null && now - view.replayAt < 30_000 && (
-            <Text dimColor>{fit('Opened in the Replay Theater tab. Esc, then /replay brings it to the front.', width)}</Text>
+            <Text dimColor>{fit('Opened in the Replay Theater tab. Esc, then /replay brings it to the front.', peekW)}</Text>
           )}
           {s.isSelf && hb.root !== '' && (
             <Box flexDirection="column" marginTop={1}>
-              {heading(`BOARD · ${fit(m(hb.label), Math.max(6, width - 28))}`, `${others.length} other session${others.length === 1 ? '' : 's'} in this repo`, 'blue')}
+              {heading(`BOARD · ${fit(m(hb.label), Math.max(6, peekW - 28))}`, `${others.length} other session${others.length === 1 ? '' : 's'} in this repo`, 'blue')}
               <Box gap={1}>
                 <Text dimColor>to</Text>
                 <Button key="hub-to-all" plain dimColor={hb.to !== 'all'} label={hb.to === 'all' ? '[all]' : 'all'} onPress={() => update($, hubAtom, x => ({ ...x, to: 'all' }))} />
@@ -1600,7 +1690,7 @@ export const register: Register = on => {
                 const who = `${msg.fromName}${msg.by === 'claude' ? '·claude' : ''}${msg.to === 'all' ? '' : `→${msg.to === hb.to ? (toMember?.name ?? 'one') : (hb.members.find(x => x.sessionId === msg.to)?.name ?? 'one session')}`}`
                 return (
                   <Box key={`hub-msg:${msg.id}`} flexDirection="column">
-                    {wrap(m(`${clockOf(msg.at)} ${who}: ${msg.text}`), width - 1, 2).map((line, i) => (
+                    {wrap(m(`${clockOf(msg.at)} ${who}: ${msg.text}`), peekW - 1, 2).map((line, i) => (
                       <Text key={`hub-msg:${msg.id}:${i}`} dimColor={i > 0}>{`${i === 0 ? '' : '  '}${line}`}</Text>
                     ))}
                   </Box>
@@ -1611,7 +1701,7 @@ export const register: Register = on => {
                 <Button key="hub-wake" plain dimColor={!hb.wake} label={hb.wake ? '[wake: on]' : '[wake: off]'} onPress={() => update($, hubAtom, x => ({ ...x, wake: !x.wake }))} />
                 <Button key="hub-report" plain label="[report]" onPress={() => reportHub($)} />
               </Box>
-              {hb.note !== '' && <Text dimColor>{fit(hb.note, width)}</Text>}
+              {hb.note !== '' && <Text dimColor>{fit(hb.note, peekW)}</Text>}
             </Box>
           )}
           {closeRow}
@@ -1639,18 +1729,18 @@ export const register: Register = on => {
       }
       const lt = loop === undefined ? null : loopLines(loop, now, m0.isWorking)
       return (
-        <Box flexDirection="column" marginTop={1}>
+        <Box key={`peek:node:${n.id}`} flexDirection="column" borderStyle="round" borderColor={loop !== undefined ? 'cyan' : 'magenta'} paddingX={1}>
           <Box>
             <Text bold color={loop !== undefined ? 'cyan' : 'magenta'}>{title}</Text>
-            <Text>{`  ${fit(m(s.isSelf ? n.title : `${s.name} › ${n.title}`), width - title.length - 2)}`}</Text>
+            <Text bold>{`  ${fit(m(s.isSelf ? n.title : `${s.name} › ${n.title}`), peekW - title.length - 2)}`}</Text>
           </Box>
-          {lt !== null && <Text>{fit(lt.head, width)}</Text>}
-          {lt !== null && wrap(lt.detail, width, 3).map((l, i) => <Text key={`loopd:${n.id}:${i}`} dimColor>{l}</Text>)}
-          {lt === null && detail(`state:${n.id}`, 'state', `${STATUS_WORD[n.status]}${n.status === 'waiting' || n.status === 'stuck' ? ` · ${n.why}` : ''}`, 3, n.status === 'waiting' ? 'yellow' : n.status === 'stuck' ? STUCK_COLOR : undefined)}
-          {lt === null && n.now !== '' && detail(`now:${n.id}`, 'now', n.now, 2, 'cyan')}
-          {n.raw !== '' && (loop !== undefined || (n.status !== 'done' && n.status !== 'failed')) && detail(`raw:${n.id}`, loop !== undefined ? 'prompt' : 'tool', n.raw, 2)}
-          {n.progress !== null && detail(`prog:${n.id}`, 'steps', bar(n.progress), 1, 'magenta')}
-          {n.status === 'done' && n.why !== '' && detail(`res:${n.id}`, '→', n.why, 3)}
+          {lt !== null && <Text>{fit(lt.head, peekW)}</Text>}
+          {lt !== null && wrap(lt.detail, peekW, 3).map((l, i) => <Text key={`loopd:${n.id}:${i}`} dimColor>{l}</Text>)}
+          {lt === null && detail(`state:${n.id}`, 'state', `${STATUS_WORD[n.status]}${n.status === 'waiting' || n.status === 'stuck' ? ` · ${n.why}` : ''}`, 3, n.status === 'waiting' ? 'yellow' : n.status === 'stuck' ? STUCK_COLOR : undefined, peekW)}
+          {lt === null && n.now !== '' && detail(`now:${n.id}`, 'now', n.now, 2, 'cyan', peekW)}
+          {n.raw !== '' && (loop !== undefined || (n.status !== 'done' && n.status !== 'failed')) && detail(`raw:${n.id}`, loop !== undefined ? 'prompt' : 'tool', n.raw, 2, undefined, peekW)}
+          {n.progress !== null && detail(`prog:${n.id}`, 'steps', bar(n.progress), 1, 'magenta', peekW)}
+          {n.status === 'done' && n.why !== '' && detail(`res:${n.id}`, '→', n.why, 3, undefined, peekW)}
           {(loop !== undefined || (shell !== undefined && shell.taskId !== null)) && (
             <Box gap={1} marginTop={1}>
               <Button key={loop !== undefined ? `loop-stop:${loop.id}` : `job-stop:${n.id}`} label={isConfirming ? 'Press again to stop' : 'Stop'} onPress={stop} />
@@ -1659,8 +1749,11 @@ export const register: Register = on => {
           )}
           {!s.isSelf && (
             <Box gap={1} marginTop={1}>
-              <Button key={`jump:${s.sessionId}`} label={`Jump to ${fit(s.name, 20)}`} variant="primary" onPress={() => jumpTo($, s.sessionId)} />
+              <Button key={`jump:${s.sessionId}`} label={`Jump to ${fit(s.name, 20)}`} variant="primary" onPress={() => startJump($, s.sessionId)} />
             </Box>
+          )}
+          {!s.isSelf && view.jump != null && view.jump.sessionId === s.sessionId && (view.jump.at === 0 || now - view.jump.at < 60_000) && (
+            <Text color={view.jump.at === 0 ? 'cyan' : view.jump.isOk ? 'green' : 'red'}>{wrap(`${view.jump.at === 0 ? spin : view.jump.isOk ? '✓' : '✗'} ${m(view.jump.text)}`, peekW, 3).join('\n  ')}</Text>
           )}
           {closeRow}
         </Box>
@@ -1679,7 +1772,7 @@ export const register: Register = on => {
       }
       // Closed or ended meanwhile: say so instead of drawing nothing.
       return (
-        <Box flexDirection="column" marginTop={1}>
+        <Box key="peek:gone" flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1}>
           <Text dimColor>That one has ended or left the map.</Text>
           {closeRow}
         </Box>
@@ -1723,75 +1816,201 @@ export const register: Register = on => {
           {active.map(s => (zoom === 'cards' ? card(s) : zoom === 'lines' ? lines(s) : dots(s)))}
           {quiet.length > 0 && (
             <Box flexDirection="column" marginTop={1}>
-              {heading('IDLE', `${quiet.length} other session${quiet.length === 1 ? '' : 's'}, nothing running`)}
-              {quiet.map(s => (zoom === 'dots' ? dots(s) : lineRow(s, null, '')))}
+              {heading('IDLE', `${quiet.length} other session${quiet.length === 1 ? '' : 's'}, nothing running · press to open`)}
+              {quiet.map(quietRow)}
             </Box>
           )}
           {board}
         </Box>
-        {opened()}
+        {/* Opened but in no session's block (ended, or left the map): said at the end. */}
+        {openSid === null && (peekState.agentId !== null || view.sel !== null) && <Box flexDirection="column" marginTop={1}>{opened()}</Box>}
       </Box>
     )
 
-    // ---- tasks ----
-    const barWidth = Math.max(4, Math.min(16, width - 26))
-    const filled = total === 0 ? 0 : Math.round((done / total) * barWidth)
-    const meter = `[${'#'.repeat(filled)}${'-'.repeat(barWidth - filled)}]`
+    // ---- tasks: the whole list in its own order, what is done kept and ticked ----
     const goalTime = g.startedAt === null ? '' : elapsed(now - g.startedAt)
-    const openTasks = g.tasks.filter(t => t.status !== 'completed')
+    const taskW = width - 4
+    const barCells = Math.max(4, Math.min(24, taskW - 8))
+    const filled = total === 0 ? 0 : Math.round((done / total) * barCells)
+    const doingCount = g.tasks.filter(t => t.status === 'in_progress').length
+    const todoCount = total - done - doingCount
+    const taskRow = (t: Task, i: number) => {
+      const isNow = t.status === 'in_progress'
+      const isDone = t.status === 'completed'
+      const lead = `${String(i + 1).padStart(String(Math.min(total, SHOWN_TASKS)).length)} `
+      const room = taskW - lead.length - 2 - (isNow ? 4 : 0)
+      const [first = '', second] = wrap(m(t.subject), room, 2)
+      return (
+        <Box key={`task:${t.id}`} flexDirection="column">
+          <Box>
+            <Text dimColor>{lead}</Text>
+            <Text color={isDone ? 'green' : isNow ? 'yellow' : 'gray'}>{`${isDone ? '✓' : isNow ? spin : '○'} `}</Text>
+            <Text bold={isNow} color={isNow ? 'yellow' : undefined} dimColor={isDone}>{first}</Text>
+            {isNow && <Text color="yellow">{' now'}</Text>}
+          </Box>
+          {second !== undefined && <Text dimColor={!isNow}>{`${' '.repeat(lead.length + 2)}${second}`}</Text>}
+        </Box>
+      )
+    }
     const tasksTab = (
       <Box flexDirection="column">
-        {heading('TASKS', total === 0 ? 'none yet' : `${done}/${total} ${meter} ${goalTime}`)}
-        {total === 0 && <Text dimColor>{fit('Claude has no task list in this session.', width)}</Text>}
-        {[...openTasks.filter(t => t.status === 'in_progress'), ...openTasks.filter(t => t.status === 'pending')].slice(0, SHOWN_TASKS * 2).map(t => (t.status === 'in_progress'
-          ? <Text color="yellow" bold>{fit(m(`[>] ${t.subject}`), width)}</Text>
-          : <Text>{fit(m(`[ ] ${t.subject}`), width)}</Text>))}
-        {done > 0 && <Text dimColor>{`[x] ${done} done`}</Text>}
+        <Box key="tasks-card" flexDirection="column" borderStyle="round" borderColor={total > 0 && done === total ? 'green' : total > 0 ? 'claude' : 'gray'} paddingX={1}>
+          <Box>
+            <Text bold>Tasks</Text>
+            <Text dimColor>{total === 0 ? '  none yet' : `  ${done} of ${total} done${goalTime === '' ? '' : ` · ${goalTime}`}`}</Text>
+          </Box>
+          {total === 0
+            ? wrap('Claude has no task list in this session yet. When it makes one, every task shows here, the finished ones ticked.', taskW, 3).map((l, i) => <Text key={`tasks-none:${i}`} dimColor>{l}</Text>)
+            : (
+              <Box flexDirection="column">
+                <Box>
+                  <Text color="green">{'▰'.repeat(filled)}</Text>
+                  <Text dimColor>{`${'▱'.repeat(barCells - filled)} ${Math.round((done / total) * 100)}%`}</Text>
+                </Box>
+                <Text dimColor>{fit([doingCount > 0 ? `${doingCount} in progress` : '', todoCount > 0 ? `${todoCount} to do` : '', done > 0 ? `${done} done` : ''].filter(x => x !== '').join(' · '), taskW)}</Text>
+                <Box flexDirection="column" marginTop={1}>
+                  {g.tasks.slice(0, SHOWN_TASKS).map(taskRow)}
+                  {total > SHOWN_TASKS && <Text dimColor>{`+${total - SHOWN_TASKS} more`}</Text>}
+                </Box>
+              </Box>
+            )}
+        </Box>
       </Box>
     )
 
-    // ---- launch: start a subagent type or run a skill by hand ----
-    const pickedEntry = launch.picked === null ? undefined : catalogList.find(c => c.kind === launch.kind && c.name === launch.picked)
+    // ---- launch: every agent type and skill as a card, the name on the left, its prompt on the right ----
     const matches = filterCatalog(catalogList, launch.kind, launch.query)
-    const agentCount = catalogList.filter(c => c.kind === 'agent').length
-    const skillCount = catalogList.filter(c => c.kind === 'skill').length
-    const entryRow = (c: CatalogEntry) => {
-      const nameCol = Math.min(22, Math.max(10, Math.floor(width * 0.4)))
-      const label = `${padEnd(fit(c.name, nameCol), nameCol)} ${fit(c.description, width - nameCol - 2)}`
-      return <Button key={`pick:${c.kind}:${c.name}`} plain label={label} onPress={() => update($, launchAtom, l => ({ ...l, picked: c.name, note: '' }))} />
+    const cardInner = width - 4
+    const rightW = Math.max(11, Math.round(cardInner * 0.3))
+    const leftW = cardInner - rightW
+    const liveOf = (name: string) => views.filter(v => v.isLive && v.type === name)
+    const liveCount = views.filter(v => v.isLive).length
+    const skillFrom = (source: string): string => (source === 'user' ? 'yours' : source === 'builtin' ? 'built-in' : source)
+    // Each pick's task box is a field of its own, so it opens empty, not with what was typed last time.
+    const taskKey = (seq: number | undefined): string => `launch-task:${seq ?? 0}`
+    // The task box takes the keys (the pane asks for them first: a click leaves them with the prompt).
+    const focusTask = async () => {
+      await $.ui.open({ id: PANE, title: TITLE, focus: true }).catch(() => undefined)
+      await $.ui.focus({ requestId: PANE, key: taskKey((await read($, launchAtom)).seq) }).catch(() => undefined)
+    }
+    // Picked, its task box opens; picked again, it closes.
+    const pick = (c: CatalogEntry) => async () => {
+      await update($, launchAtom, l => ({ ...l, picked: l.picked === c.name ? null : c.name, seq: (l.seq ?? 0) + 1, note: '' }))
+      if ((await read($, launchAtom)).picked === c.name) await focusTask()
+    }
+    const unpick = () => update($, launchAtom, l => ({ ...l, picked: null, note: '' }))
+    const openRun = (agentId: string) => async () => {
+      await update($, viewAtom, v => ({ ...v, tab: 'map' as const, sel: null, confirm: null }))
+      if ((await read($, peek)).agentId !== agentId) await togglePeek($, agentId)
+    }
+    const entryCard = (c: CatalogEntry) => {
+      const key = `${c.kind}:${c.name}`
+      const isPicked = launch.picked === c.name
+      const live = c.kind === 'agent' ? liveOf(c.name) : []
+      const first = live[0]
+      const tag = c.kind === 'agent' ? (c.model ?? '') : skillFrom(c.source)
+      const nameRoom = Math.max(6, leftW - 3 - (tag === '' ? 0 : cellWidth(tag) + 2))
+      // At rest the description sits in the left 70%; picked, it and the task box take the card's whole width.
+      const desc = wrap(m(c.description || 'No description given.'), isPicked ? cardInner - 2 : leftW - 3, isPicked ? 4 : 2)
+      const descLines = desc.map((l, i) => <Text key={`ldesc:${key}:${i}`} dimColor>{`  ${l}`}</Text>)
+      const border = isPicked ? 'green' : first !== undefined ? 'magenta' : 'gray'
+      return (
+        <Box key={`lcard:${key}`} flexDirection="column" borderStyle="round" borderColor={border} borderDimColor={border === 'gray'} hover={{ borderColor: 'claude', borderDimColor: false }} paddingX={1}>
+          <Box>
+            <Box flexDirection="column" width={leftW}>
+              <Box>
+                <Text color={c.kind === 'agent' ? dotColor(c) : 'claude'}>{c.kind === 'agent' ? '● ' : '/ '}</Text>
+                <Button key={`pick:${key}`} plain label={c.name} onPress={pick(c)}>
+                  <Text bold>{fit(c.name, nameRoom)}</Text>
+                  {tag === '' ? '' : <Text dimColor>{`  ${fit(tag, 14)}`}</Text>}
+                </Button>
+              </Box>
+              {!isPicked && descLines}
+            </Box>
+            <Box width={rightW} justifyContent="flex-end">
+              {isPicked
+                ? <Button key="launch-back" label="cancel" onPress={unpick} />
+                : first !== undefined
+                  ? (
+                    <Button key={`running:${key}`} plain label={`${c.name} running`} onPress={openRun(first.id)}>
+                      <Text color="magenta">{fit(`${spin} ${live.length > 1 ? `${live.length} running` : `running · ${dur(now - first.from)}`}`, rightW)}</Text>
+                    </Button>
+                  )
+                  : <Button key={`run:${key}`} label="▶ run" onPress={pick(c)} />}
+            </Box>
+          </Box>
+          {isPicked && descLines}
+          {isPicked && Input !== null && (
+            <Box marginTop={1}>
+              {c.kind === 'agent'
+                ? <Input key={taskKey(launch.seq)} label="task" placeholder="what it should do, Enter starts it" submitLabel="start" autoFocus onSubmit={value => launchAgent($, c.name, value)} />
+                : <Input key={taskKey(launch.seq)} label="args" placeholder="optional, Enter runs it" submitLabel="run" autoFocus onSubmit={value => runSkill($, c.name, value)} />}
+            </Box>
+          )}
+          {isPicked && (
+            <Box gap={1}>
+              <Text>{' '}</Text>
+              {c.kind === 'skill' && <Button key="launch-run" plain label="[run now]" onPress={() => runSkill($, c.name, '')} />}
+              <Button key="launch-fill" plain label="[to prompt]" onPress={() => $.prompt.fill({ text: c.kind === 'skill' ? `/${c.name} ` : `Use the ${c.name} agent to ` }).then(unpick)} />
+            </Box>
+          )}
+        </Box>
+      )
+    }
+    const sectionHead = (key: string, label: string, hint: string, count: number) => {
+      const text = `${label}  ${hint} · ${count} `
+      return (
+        <Box key={`lsec:${key}`} marginTop={1}>
+          <Text bold color="#87afd7">{label}</Text>
+          <Text dimColor>{`  ${hint} · ${count} ${'─'.repeat(Math.max(0, width - cellWidth(text)))}`}</Text>
+        </Box>
+      )
+    }
+    const kindCard = (kind: CatalogEntry['kind'], label: string) => {
+      const isOn = launch.kind === kind
+      return (
+        <Box key={`kindcard:${kind}`} borderStyle="round" borderColor={isOn ? 'claude' : 'gray'} borderDimColor={!isOn} hover={{ borderColor: 'claude', borderDimColor: false }} paddingX={1}>
+          <Button key={`launch-kind:${kind}`} plain label={label} onPress={() => update($, launchAtom, l => ({ ...l, kind, picked: null, query: '', note: '' }))}>
+            <Text bold={isOn} color={isOn ? 'claude' : undefined}>{label}</Text>
+          </Button>
+        </Box>
+      )
     }
     const launchTab = (
       <Box flexDirection="column">
-        {heading('LAUNCH', `${agentCount} agents · ${skillCount} skills`, 'green')}
-        {pickedEntry !== undefined ? (
-          <Box flexDirection="column">
-            <Text bold color="green">{fit(`▶ ${pickedEntry.kind === 'agent' ? 'agent' : 'skill /'}${pickedEntry.kind === 'agent' ? ' ' : ''}${pickedEntry.name}`, width)}</Text>
-            {detail('picked-role', '', pickedEntry.description, 3)}
-            {Input === null ? null : pickedEntry.kind === 'agent'
-              ? <Input key="launch-task" label="task › " placeholder="what the agent should do" submitLabel="start" autoFocus onSubmit={value => launchAgent($, pickedEntry.name, value)} />
-              : <Input key="launch-task" label="args › " placeholder="optional, Enter runs" submitLabel="run" autoFocus onSubmit={value => runSkill($, pickedEntry.name, value)} />}
-            <Box gap={1}>
-              {pickedEntry.kind === 'skill' && <Button key="launch-run" plain label="[run now]" onPress={() => runSkill($, pickedEntry.name, '')} />}
-              {pickedEntry.kind === 'skill' && <Button key="launch-fill" plain label="[to prompt]" onPress={() => $.prompt.fill({ text: `/${pickedEntry.name} ` }).then(() => update($, launchAtom, l => ({ ...l, picked: null, note: '' })))} />}
-              <Button key="launch-back" plain dimColor label="[back]" onPress={() => update($, launchAtom, l => ({ ...l, picked: null, note: '' }))} />
-            </Box>
+        <Box key="launch-head" justifyContent="space-between">
+          <Box>
+            <Text color="claude">{'◆ '}</Text>
+            <Text bold>{launch.kind === 'agent' ? 'Agents' : 'Skills'}</Text>
+            <Text dimColor>{launch.kind === 'agent' ? ' you can start from here' : ' you can run from here'}</Text>
           </Box>
-        ) : (
-          <Box flexDirection="column">
-            <Box gap={1}>
-              <Button key="launch-kind:agent" plain dimColor={launch.kind !== 'agent'} label={`[agents ${agentCount}]`} onPress={() => update($, launchAtom, l => ({ ...l, kind: 'agent' as const, picked: null, query: '', note: '' }))} />
-              <Button key="launch-kind:skill" plain dimColor={launch.kind !== 'skill'} label={`[skills ${skillCount}]`} onPress={() => update($, launchAtom, l => ({ ...l, kind: 'skill' as const, picked: null, query: '', note: '' }))} />
+          {liveCount > 0 && <Text color="magenta">{`${spin} ${liveCount} running`}</Text>}
+        </Box>
+        <Box gap={1}>
+          {kindCard('agent', `Agents ${agentCount}`)}
+          {kindCard('skill', `Skills ${skillCount}`)}
+        </Box>
+        {Input !== null && <Input key="launch-filter" label="find › " placeholder="type to filter, Enter picks the first" value={launch.query} onInput={value => update($, launchAtom, l => ({ ...l, query: value }))} onSubmit={async value => {
+          const firstMatch = filterCatalog(catalogList, launch.kind, value)[0]
+          if (firstMatch === undefined) return
+          await update($, launchAtom, l => ({ ...l, query: value, picked: firstMatch.name, seq: (l.seq ?? 0) + 1 }))
+          await focusTask()
+        }} />}
+        {launch.note !== '' && <Text color={launch.note.startsWith('Not started') || launch.note.startsWith('Could not') ? 'red' : 'green'}>{fit(m(launch.note), width)}</Text>}
+        {launch.kind === 'agent'
+          ? catalogSections(matches).map(sec => (
+            <Box key={`lsecbox:${sec.key}`} flexDirection="column">
+              {sectionHead(sec.key, sec.label, sec.hint, sec.entries.length)}
+              {sec.entries.map(entryCard)}
             </Box>
-            {Input !== null && <Input key="launch-filter" label="find › " placeholder="type to filter" value={launch.query} onInput={value => update($, launchAtom, l => ({ ...l, query: value }))} onSubmit={value => {
-              const first = filterCatalog(catalogList, launch.kind, value)[0]
-              if (first !== undefined) void update($, launchAtom, l => ({ ...l, query: value, picked: first.name }))
-            }} />}
-            {matches.slice(0, SHOWN_LAUNCH).map(entryRow)}
-            {matches.length === 0 && <Text dimColor>{fit(`No ${launch.kind} matches "${launch.query}".`, width)}</Text>}
-            {matches.length > SHOWN_LAUNCH && <Text dimColor>{fit(`  +${matches.length - SHOWN_LAUNCH} more · type to narrow`, width)}</Text>}
-          </Box>
-        )}
-        {launch.note !== '' && <Text dimColor>{fit(m(launch.note), width)}</Text>}
+          ))
+          : (
+            <Box flexDirection="column" marginTop={1}>
+              {matches.slice(0, SHOWN_LAUNCH).map(entryCard)}
+              {matches.length > SHOWN_LAUNCH && <Text dimColor>{fit(`  +${matches.length - SHOWN_LAUNCH} more · type to narrow`, width)}</Text>}
+            </Box>
+          )}
+        {matches.length === 0 && <Text dimColor>{fit(launch.query === '' ? `No ${launch.kind === 'agent' ? 'agent types' : 'skills'} found yet.` : `Nothing matches "${launch.query}".`, width)}</Text>}
       </Box>
     )
 

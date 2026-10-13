@@ -1,6 +1,6 @@
 {
   "name": "agent-map",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Agent Map: every Claude Code session on this computer and what each one started (subagents, background shells, loops), what needs you or may be stuck, a Peek on any of them with actions, tasks and a launcher. Reads savvy-progress and flightdeck when they are loaded.",
   "author": {
     "name": "Hillman Chan",

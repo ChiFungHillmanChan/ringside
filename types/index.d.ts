@@ -88,6 +88,9 @@ export type CatalogEntry = {
   name: string
   description: string
   source: string
+  // What an agent file names: its model ('sonnet') and its colour ('blue').
+  model?: string
+  color?: string
 }
 
 export type Launch = {
@@ -97,6 +100,8 @@ export type Launch = {
   // The entry chosen to run, by name; its task box shows.
   picked: string | null
   note: string
+  // Counts the picks: each pick's task box is a new field, so it opens empty (absent in older state).
+  seq?: number
 }
 
 // The main loop: working or the person's turn, and what it waits on.
@@ -230,7 +235,11 @@ export type View = {
   confirm: string | null
   // When the replay button was last pressed (absent in older state).
   replayAt?: number | null
+  // What the last Jump did, shown in that session's card (absent in older state).
+  jump?: JumpNote | null
 }
+
+export type JumpNote = { sessionId: string; at: number; isOk: boolean; text: string }
 
 declare module 'claude-code' {
   interface PluginState {

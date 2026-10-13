@@ -104,6 +104,7 @@ export function shellQuote(s: string): string {
 }
 
 // Each window in a `try`: a window with no tabs (Settings) fails the loop otherwise.
+// A window minimised to the Dock comes back first; raising it alone leaves it there.
 export const FOCUS_TERMINAL = [
   'on run argv',
   'set target to item 1 of argv',
@@ -113,6 +114,7 @@ export const FOCUS_TERMINAL = [
   'try',
   'repeat with t in tabs of w',
   'if tty of t is target then',
+  'if miniaturized of w then set miniaturized of w to false',
   'set selected of t to true',
   'set index of w to 1',
   'activate',

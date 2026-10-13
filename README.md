@@ -18,9 +18,9 @@ When you run several Claude sessions, or one session that fans out into subagent
 
 - **What is running.** Each session is a box. What it started hangs under it with `├─▸` / `└─▸`: subagents, background shells, loops and workflow agents.
 - **What each agent is for and what it is doing.** Its type and task, and its current step in plain words ("reading pricing.ts", "running tests", "listing files"), with a clock.
-- **Press to look inside.** Press any box to Peek. For an agent that is its role, task, steps, cost and result. For a session it is where it runs and what it waits on, plus Jump there.
+- **Press to look inside.** Press any box to Peek; it opens as a card right under what you pressed. For an agent that is its role, task, steps, cost and result. For a session it is what it last said, its folder, its terminal, plus Jump there and what the jump did.
 - **What needs you.** NEEDS YOU sits on top across every session: questions, plan approvals and permission prompts, plus anything that may be stuck.
-- **Tasks and a launcher.** The Tasks tab holds Claude's task list. The Launch tab starts any agent type or skill by hand.
+- **Tasks and a launcher.** Map, Tasks and Launch are three cards at the top. The Tasks tab is Claude's whole task list in order, the finished ones ticked. The Launch tab lists every agent type as a card, grouped by where it comes from (the project's `.claude/agents`, yours, plugins, built-in), with its colour and model on the left 70% and **▶ run** on the right 30%; run opens a task box across the card. Skills are cards too.
 
 ## Install
 
@@ -86,7 +86,7 @@ While the pane is not on screen, one row above the prompt says when another sess
 | You press | You see |
 | --- | --- |
 | a subagent | its role, task, what it is doing now, its steps, who started it, its model, cost and context, the steps it took, and its result with **use in prompt** |
-| another session | where it runs, what it waits on, what it started, and **Jump there** |
+| another session | what it last said, its folder and terminal, what it started, **Jump there**, and whether the jump worked |
 | this session | the repo board, and **replay the last turn's edits** when [Replay Theater](https://github.com/anthropics/claude-code-playground/tree/main/claude-code/mods/replay-theater) is loaded |
 | a loop or a background shell | its details and a **Stop** that takes two presses |
 
@@ -139,7 +139,7 @@ It makes no network requests and calls no model. `CLAUDE_CONFIG_DIR` is respecte
 
 - No API can stop a subagent today, so Stop is offered for loops and background shells only.
 - For another session's subagent, Peek shows the summary that session published, not its full transcript.
-- A session only shares what it started once it runs Agent Map itself. Sessions that do not show as plain boxes marked `(no map)`.
+- A session only shares what it started once it runs Agent Map itself. For one that does not, its card says so. A background session that ended, or has sat blocked, for over a day is left off the map.
 - Jump needs Terminal, iTerm2 or tmux. In other terminals it says it could not find the window.
 - Mods are an early-access Claude Code feature, and their API can change between releases.
 

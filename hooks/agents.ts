@@ -115,11 +115,17 @@ export function skillsFrom(commands: readonly CommandLike[], self: string): Cata
     .map(c => ({ kind: 'skill' as const, name: c.name, description: oneLine(c.description), source: c.plugin ?? c.source }))
 }
 
-// One agent type the engine offered the model: added or refreshed.
-export function mergeOffer(list: readonly CatalogEntry[], offer: { agent: string; description: string; source: string }): CatalogEntry[] {
-  const entry: CatalogEntry = { kind: 'agent', name: offer.agent, description: oneLine(offer.description), source: offer.source }
+// One agent type the engine offered the model: added or refreshed. The model and colour an
+// agent file named stay: the engine's offer does not carry them.
+export function mergeOffer(list: readonly CatalogEntry[], offer: { agent: string; description: string; source: string; model?: string; color?: string }): CatalogEntry[] {
   const prior = list.find(c => c.kind === 'agent' && c.name === offer.agent)
-  if (prior !== undefined && prior.description === entry.description && prior.source === entry.source) return [...list]
+  const model = offer.model ?? prior?.model
+  const color = offer.color ?? prior?.color
+  const entry: CatalogEntry = {
+    kind: 'agent', name: offer.agent, description: oneLine(offer.description), source: offer.source,
+    ...(model === undefined ? {} : { model }), ...(color === undefined ? {} : { color }),
+  }
+  if (prior !== undefined && JSON.stringify(prior) === JSON.stringify(entry)) return [...list]
   return [...list.filter(c => !(c.kind === 'agent' && c.name === offer.agent)), entry]
 }
 
@@ -127,7 +133,7 @@ export function replaceSkills(list: readonly CatalogEntry[], skills: readonly Ca
   return [...list.filter(c => c.kind === 'agent'), ...skills]
 }
 
-// An agent file's frontmatter: its name and description.
+// An agent file's frontmatter: its name and description, and the model and colour it names.
 export function agentFromMarkdown(text: string, fallback: string, source: string): CatalogEntry | null {
   const fm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text)
   if (fm === null) return null
@@ -136,7 +142,53 @@ export function agentFromMarkdown(text: string, fallback: string, source: string
     return (m?.[1] ?? '').trim().replace(/^["']|["']$/g, '')
   }
   const name = field('name') || fallback
-  return name === '' ? null : { kind: 'agent', name, description: oneLine(field('description')), source }
+  if (name === '') return null
+  const model = shortModel(field('model'))
+  const color = field('color').toLowerCase()
+  return {
+    kind: 'agent', name, description: oneLine(field('description')), source,
+    ...(model === '' || model === 'inherit' ? {} : { model }), ...(color === '' ? {} : { color }),
+  }
+}
+
+/* ---------- the launcher's cards ---------- */
+
+export type CatalogSection = { key: string; label: string; hint: string; entries: CatalogEntry[] }
+
+// Where an agent type comes from, in the order the launcher lists them.
+const SOURCES: readonly { key: string; label: string; hint: string; match: (source: string) => boolean }[] = [
+  { key: 'project', label: 'PROJECT', hint: '.claude/agents', match: s => s === 'projectSettings' || s === 'localSettings' },
+  { key: 'user', label: 'YOURS', hint: '~/.claude/agents', match: s => s === 'userSettings' },
+  { key: 'plugin', label: 'PLUGINS', hint: 'from plugins', match: s => s === 'plugin' },
+  { key: 'builtin', label: 'BUILT-IN', hint: 'Claude Code', match: s => s === 'built-in' || s === 'builtin' },
+]
+
+// The matching entries grouped by where they come from; a group with none is left out.
+export function catalogSections(entries: readonly CatalogEntry[]): CatalogSection[] {
+  const left = [...entries]
+  const sections: CatalogSection[] = []
+  for (const s of SOURCES) {
+    const mine = left.filter(c => s.match(c.source))
+    if (mine.length > 0) sections.push({ key: s.key, label: s.label, hint: s.hint, entries: mine })
+    for (const c of mine) left.splice(left.indexOf(c), 1)
+  }
+  if (left.length > 0) sections.push({ key: 'other', label: 'OTHER', hint: 'settings', entries: left })
+  return sections
+}
+
+// Claude Code's agent colours as the terminal draws them.
+const AGENT_COLORS: Record<string, string> = {
+  red: '#d75f5f', blue: '#87afd7', green: '#87d787', yellow: '#d7d787', purple: '#af87d7', orange: '#d7875f', pink: '#d787af', cyan: '#87d7d7',
+}
+const PALETTE = ['#87afd7', '#87d7d7', '#d7d787', '#d7875f', '#d7afd7', '#d75f5f', '#87d787', '#afafd7']
+
+// The dot a card leads with: the colour the agent file names, else one kept for its name.
+export function dotColor(entry: CatalogEntry): string {
+  const named = entry.color === undefined ? undefined : AGENT_COLORS[entry.color] ?? (entry.color.startsWith('#') ? entry.color : undefined)
+  if (named !== undefined) return named
+  let n = 0
+  for (const ch of entry.name) n = (n * 31 + (ch.codePointAt(0) ?? 0)) >>> 0
+  return PALETTE[n % PALETTE.length] ?? '#87afd7'
 }
 
 // What the launcher lists for a query: names that start with it first, then the rest that contain it.

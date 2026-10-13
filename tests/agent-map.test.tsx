@@ -424,13 +424,37 @@ test('the launcher starts an agent type with a task and runs a skill with args',
   await clock.settle()
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  // The task box's key changes with each pick, so it opens empty.
+  const taskBox = async (): Promise<string | undefined> => {
+    const box = (await ui.findAll({ type: 'Input' })).find(i => String(i.key).startsWith('launch-task'))
+    return box === undefined ? undefined : String(box.key)
+  }
   expect(await ui.find({ key: 'pick:agent:Explore' })).toBeUndefined()
   await ui.press({ key: 'tab:launch' })
+  // Each agent type is a card with its own run button; no prompt box until one is picked.
+  expect(await ui.find({ key: 'lcard:agent:Explore' })).toBeDefined()
+  expect(await ui.find({ key: 'run:agent:Explore' })).toBeDefined()
+  expect(await taskBox()).toBeUndefined()
+  await ui.press({ key: 'run:agent:Explore' })
+  const firstBox = await taskBox()
+  expect(firstBox).toBeDefined()
+  // Picked, cancel takes the run button's place; the box spans the card below the name.
+  expect(await ui.find({ key: 'run:agent:Explore' })).toBeUndefined()
+  expect(String((await ui.find({ key: 'launch-back' }))?.props.label)).toBe('cancel')
+  await ui.press({ key: 'launch-back' })
+  expect(await taskBox()).toBeUndefined()
   await ui.press({ key: 'pick:agent:Explore' })
-  expect(await ui.find({ type: 'Text', text: '▶ agent Explore' })).toBeDefined()
-  await ui.input({ key: 'launch-task', text: 'Map the auth flow end to end' })
+  const secondBox = await taskBox()
+  expect(secondBox).toBeDefined()
+  expect(secondBox).not.toBe(firstBox)
+  await ui.input({ key: String(secondBox), text: 'Map the auth flow end to end' })
   expect(spawned.map(s => [s.prompt, s.description])).toEqual([['Map the auth flow end to end', 'Map the auth flow end to']])
   expect(await ui.find({ type: 'Text', text: /Started Explore/ })).toBeDefined()
+  // Running: the card says so where its run button was, and a press opens it on the map.
+  expect(String((await ui.find({ key: 'running:agent:Explore' }))?.props.label)).toBe('Explore running')
+  await ui.press({ key: 'running:agent:Explore' })
+  expect(await ui.find({ type: 'Text', text: /^by you · / })).toBeDefined()
+  await ui.press({ key: 'peek-close' })
   // Its card on the map, under the agent's id or, until the engine lists it, a pending one.
   await ui.press({ key: 'tab:map' })
   const card = (await ui.findAll({ type: 'Button' })).find(b => String(b.key).startsWith('agent:') && /^Explore · Map the auth flow end/.test(String(b.props.label)))
@@ -449,7 +473,7 @@ test('the launcher starts an agent type with a task and runs a skill with args',
   expect(await ui.find({ key: 'pick:skill:ship-it' })).toBeUndefined()
   await ui.input({ key: 'launch-filter', text: 'ship', kind: 'change' })
   await ui.press({ key: 'pick:skill:ship-it' })
-  await ui.input({ key: 'launch-task', text: 'staging' })
+  await ui.input({ key: String(await taskBox()), text: 'staging' })
   expect(ran).toEqual(['staging'])
   expect(await ui.find({ type: 'Text', text: 'Queued /ship-it staging' })).toBeDefined()
   await ui.unmount()
@@ -695,6 +719,8 @@ test('with the sessions mod loaded, its list fills NEEDS YOU; pressing one bring
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   await ui.press({ key: 'need:session:w-id' })
+  // The jump runs on a timer of its own, outside the press.
+  await clock.settle()
   const osa = ran.filter(a => a[0] === '/usr/bin/osascript')
   expect(osa.length).toBe(1)
   expect(osa[0]?.[osa[0].length - 1]).toBe('/dev/ttys001')
@@ -735,6 +761,7 @@ test('without the sessions mod, other sessions come from the engine registry; pr
   expect(String((await ui.find({ key: 'need:session:other-1' }))?.props.label)).toMatch(/^shop: approve Bash +1:35$/)
   expect(await ui.find({ key: 'need:session:gone' })).toBeUndefined()
   await ui.press({ key: 'need:session:other-1' })
+  await clock.settle()
   const osa = ran.filter(a => a[0] === '/usr/bin/osascript')
   expect(osa.length).toBe(1)
   expect(osa[0]?.[osa[0].length - 1]).toBe('/dev/ttys004')
@@ -798,5 +825,127 @@ test('this session offers Replay Theater when it is loaded, and says the replay 
   await ui.press({ key: 'replay' })
   expect(ran).toEqual(['replay'])
   expect(await ui.find({ type: 'Text', text: /^Opened in the Replay Theater tab/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the tabs are cards, the shown one in the accent colour; the task list keeps what is done, ticked, in its own order', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  mock.env(on, { HOME: '/Users/test' })
+  host(on)
+  let made = 0
+  on('tool.call', { tool: 'TaskCreate' }, ($, e) => ({ result: { task: { id: String(++made), subject: e.subject } } }))
+  on('tool.call', { tool: 'TaskUpdate' }, () => ({ result: {} }))
+  await $.session.start({ cwd: '/Users/test/proj', surface: null, isInteractive: false })
+  await clock.settle()
+  for (const subject of ['Read the code', 'Build the cards', 'Check it live']) {
+    await $.tool.call({ tool: 'TaskCreate', subject, description: subject } as never)
+  }
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', status: 'completed' } as never)
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '2', status: 'in_progress' } as never)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  for (const id of ['map', 'tasks', 'launch']) {
+    const tab = await ui.find({ key: `tabcard:${id}` })
+    expect(tab?.props.borderStyle).toBe('round')
+    expect(tab?.props.borderColor).toBe(id === 'map' ? 'claude' : 'gray')
+  }
+  // A narrow pane: the card keeps the short count.
+  expect(await ui.find({ type: 'Text', text: ' 1/3' })).toBeDefined()
+  await ui.press({ key: 'tab:tasks' })
+  expect((await ui.find({ key: 'tabcard:tasks' }))?.props.borderColor).toBe('claude')
+  expect(await ui.find({ type: 'Text', text: /^ {2}1 of 3 done/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '1 in progress · 1 to do · 1 done' })).toBeDefined()
+  // The finished task is still listed, first, as it was made.
+  const drawn = JSON.stringify(await ui.drawn())
+  const at = (s: string) => drawn.indexOf(s)
+  expect(at('Read the code')).toBeGreaterThan(-1)
+  expect(at('Read the code')).toBeLessThan(at('Build the cards'))
+  expect(at('Build the cards')).toBeLessThan(at('Check it live'))
+  expect(await ui.find({ type: 'Text', text: '✓ ' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: ' now' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the launcher lists agent files by where they come from, each card with its model and colour', async ($, on) => {
+  const now = 2_000_000
+  const clock = mock.clock(on, { now })
+  mock.env(on, { HOME: '/Users/test' })
+  host(on, { fs: false })
+  const files = new Map<string, string>([
+    ['/Users/test/proj/.claude/agents/code-reviewer.md', '---\nname: code-reviewer\ndescription: Reviews the current diff for correctness bugs.\nmodel: sonnet\ncolor: blue\n---\nYou review.'],
+    ['/Users/test/.claude/agents/docs-writer.md', '---\nname: docs-writer\ndescription: Keeps README in sync.\nmodel: haiku\n---\nYou write.'],
+  ])
+  memFs(on, files, () => now)
+  await $.session.start({ cwd: '/Users/test/proj', surface: null, isInteractive: false })
+  await clock.settle()
+  // The engine's later offer of the same type does not lose what the file said.
+  await $.agent.offer({ agent: 'code-reviewer', description: 'Reviews the current diff for correctness bugs.', source: 'projectSettings' } as never).catch(() => undefined)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'tab:launch' })
+  const drawn = JSON.stringify(await ui.drawn())
+  const at = (s: string) => drawn.indexOf(s)
+  for (const k of ['lsec:project', 'lsec:user', 'lsec:builtin']) expect(at(k)).toBeGreaterThan(-1)
+  expect(at('lsec:project')).toBeLessThan(at('lsec:user'))
+  expect(at('lsec:user')).toBeLessThan(at('lsec:builtin'))
+  expect(at('lcard:agent:code-reviewer')).toBeLessThan(at('lsec:user'))
+  expect(await ui.find({ type: 'Text', text: 'PROJECT' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '  sonnet' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '  haiku' })).toBeDefined()
+  expect((await ui.findAll({ type: 'Text' })).some(t => t.props.color === '#87afd7' && String(t.props.children ?? t.text ?? '').includes('●'))).toBe(true)
+  await ui.unmount()
+})
+
+test('a session opens right under its own row, says how it is reached, and what Jump there did', async ($, on) => {
+  const now = 3_000_000
+  const clock = mock.clock(on, { now })
+  mock.env(on, { HOME: '/Users/test' })
+  host(on, { process: false })
+  on('ui.toast', () => ({ value: undefined }))
+  let osaAnswer = 'ok\n'
+  on('process.run', ($, e) => {
+    const isOsa = e.argv[0] === '/usr/bin/osascript'
+    return { value: { exitCode: isOsa ? 0 : 128, stdout: isOsa ? osaAnswer : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  const day = 24 * 60 * 60 * 1000
+  const rows = [
+    session({ sessionId: 'self-id', isSelf: true, since: now - 1_000 }),
+    session({ sessionId: 'a-id', name: 'alpha', cwd: '/Users/test/alpha', tty: '/dev/ttys004', since: now - 60_000, summary: 'Merged the branch.' }),
+    session({ sessionId: 'z-id', name: 'zeta', cwd: '/Users/test/zeta', tty: '/dev/ttys005', since: now - 60_000 }),
+    session({ sessionId: 'bg-old', jobId: 'job-old', name: 'old audit', tty: null, pid: null, state: 'done', since: now - 2 * day }),
+    session({ sessionId: 'bg-stuck', jobId: 'job-stuck', name: 'old cost check', tty: null, pid: null, state: 'blocked', group: 'needs', since: now - 40 * day }),
+    session({ sessionId: 'bg-new', jobId: 'job-new', name: 'fresh audit', tty: null, pid: null, state: 'done', since: now - 60 * 60_000 }),
+  ]
+  on('state.get', { plugin: 'sessions', key: 'rows' } as never, () => ({ value: { value: rows, version: 1 } }))
+  on('state.get', { plugin: 'sessions', key: 'hidden' } as never, () => ({ value: { value: [], version: 1 } }))
+  await $.session.start({ cwd: '/Users/test/proj', surface: null, isInteractive: false })
+  await clock.settle()
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  // A background session that ended days ago is history: not on the map. One from an hour ago is.
+  expect(await ui.find({ key: 'session:bg-old' })).toBeUndefined()
+  expect(await ui.find({ key: 'session:bg-stuck' })).toBeUndefined()
+  expect(await ui.find({ key: 'session:bg-new' })).toBeDefined()
+  // No "(no map)" tag in the row itself.
+  expect(String((await ui.find({ key: 'session:a-id' }))?.props.label)).not.toMatch(/no map/)
+  await ui.press({ key: 'session:a-id' })
+  const drawn = JSON.stringify(await ui.drawn())
+  const at = (s: string) => drawn.indexOf(s)
+  expect(at('peek:session:a-id')).toBeGreaterThan(at('"session:a-id"'))
+  expect(at('peek:session:a-id')).toBeLessThan(at('"session:z-id"'))
+  expect(await ui.find({ type: 'Text', text: 'Merged the branch.' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '~/alpha' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'ttys004' })).toBeDefined()
+  await ui.press({ key: 'jump:a-id' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /^✓ Switched to alpha's terminal \(ttys004\)/ })).toBeDefined()
+  osaAnswer = 'none\n'
+  await ui.press({ key: 'jump:a-id' })
+  await clock.settle()
+  const said = (await ui.findAll({ type: 'Text' })).map(t => String(t.text ?? '')).join(' ').replace(/\s+/g, ' ')
+  expect(said).toMatch(/✗ Could not bring alpha forward: its terminal window was not found/)
+  // A background session opens with claude attach instead.
+  await ui.press({ key: 'session:bg-new' })
+  expect(String((await ui.find({ key: 'jump:bg-new' }))?.props.label)).toBe('Open in Terminal')
   await ui.unmount()
 })

@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import {
-  adaptFlightAgents, adaptFlightLoops, adaptSavvy, asMapNode, autoZoom, buildMap, graphSvg, needsOf, plainStep, selfNodes, stateWord, stuckReason,
+  adaptFlightAgents, adaptFlightLoops, adaptSavvy, asMapNode, autoZoom, buildMap, graphSvg, needsOf, plainStep, plainSummary, selfNodes, stateWord, stuckReason,
   STUCK_QUIET_MS, STUCK_STEP_MS,
 } from '../hooks/map'
 import type { FleetFile, MapNode, RowLike, SelfSession } from '../hooks/map'
@@ -204,4 +204,13 @@ test('a wait the sessions mod has held for over a day is old news: idle, not a n
 
 test("the engine's words for a session's state read as plain words; unknown words pass through", () => {
   expect(['busy', 'waiting', 'blocked', 'idle', 'done', 'paused'].map(stateWord)).toEqual(['working', 'waiting for you', 'blocked', 'idle', 'finished', 'paused'])
+})
+
+test("a session list's tool lines read in plain words; other text stays as it is", () => {
+  expect(plainSummary('Read: hero-en.webp')).toBe('reading hero-en.webp')
+  expect(plainSummary('Bash: Wait for the CI run to finish')).toBe('wait for the CI run to finish')
+  expect(plainSummary('TaskUpdate')).toBe('updating its task list')
+  expect(plainSummary('Agent: Explore: find the auth flow')).toBe('starting Explore: find the auth flow')
+  expect(plainSummary('Note: the build is green')).toBe('Note: the build is green')
+  expect(plainSummary('Which color theme should the blog use?')).toBe('Which color theme should the blog use?')
 })

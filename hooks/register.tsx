@@ -1575,8 +1575,16 @@ export const register: Register = on => {
           )}
           {s.isSelf && hasReplay && (
             <Box gap={1} marginTop={1}>
-              <Button key="replay" plain label="[replay the last turn's edits]" onPress={() => runSkill($, 'replay', '')} />
+              <Button key="replay" plain label="[replay the last turn's edits]" onPress={async () => {
+                await runSkill($, 'replay', '')
+                const at = await $.clock.now()
+                await update($, viewAtom, v => ({ ...v, replayAt: at }))
+              }} />
             </Box>
+          )}
+          {/* A pane cannot take the keys from one the person is pressing in, so Replay Theater opens as a tab behind. */}
+          {s.isSelf && hasReplay && view.replayAt != null && now - view.replayAt < 30_000 && (
+            <Text dimColor>{fit('Opened in the Replay Theater tab. Esc, then /replay brings it to the front.', width)}</Text>
           )}
           {s.isSelf && hb.root !== '' && (
             <Box flexDirection="column" marginTop={1}>

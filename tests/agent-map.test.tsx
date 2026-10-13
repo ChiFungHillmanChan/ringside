@@ -30,11 +30,11 @@ const PANE = {
 } as const
 
 // What the session would answer beneath the plugin under test.
-function host(on: On, over: { agents?: boolean; fs?: boolean; process?: boolean } = {}): void {
+function host(on: On, over: { agents?: boolean; fs?: boolean; process?: boolean; commands?: string[] } = {}): void {
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('tool.register', ($, e) => ({ value: { tool: `mcp__agent-map__${e.name}` } }))
-  on('command.list', () => ({ value: [] }))
+  on('command.list', () => ({ value: (over.commands ?? []).map(name => ({ name, description: '', source: 'plugin' as const })) } as never))
   if (over.process !== false) on('process.run', () => ({ value: { exitCode: 128, stdout: '', stderr: 'not a git repository', isStdoutTruncated: false, isStderrTruncated: false } }))
   if (over.agents !== false) on('agent.list', () => ({ value: [] }))
   on('session.id', () => ({ value: 'test-session' }))
@@ -780,4 +780,23 @@ test('what a session tells the other maps it is doing reads in plain words', () 
   expect(presenceOf(main, [], noGoal, []).doing).toBe('thinking')
   expect(presenceOf(main, [job({})], { startedAt: 1, tasks: [{ id: '1', subject: 'Fix login', status: 'in_progress' }] }, []).doing).toBe('Fix login')
   expect(presenceOf({ ...main, isWorking: false }, [], noGoal, [])).toEqual({ state: 'idle', doing: '' })
+})
+
+test('this session offers Replay Theater when it is loaded, and says the replay opens in its own tab', async ($, on) => {
+  const clock = mock.clock(on, { now: 7_000_000 })
+  mock.env(on, { HOME: '/Users/test' })
+  host(on, { commands: ['replay'] })
+  const ran: string[] = []
+  on('command.run', { command: 'replay' }, ($, e) => {
+    ran.push(e.command)
+    return { text: 'Replay Theater: 1 edits' }
+  })
+  await $.session.start({ cwd: '/Users/test/proj', surface: null, isInteractive: false })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'session:test-session' })
+  await ui.press({ key: 'replay' })
+  expect(ran).toEqual(['replay'])
+  expect(await ui.find({ type: 'Text', text: /^Opened in the Replay Theater tab/ })).toBeDefined()
+  await ui.unmount()
 })

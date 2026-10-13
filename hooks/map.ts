@@ -200,6 +200,12 @@ export function plainStep(tool: string, detail: string): string {
       return 'handing back its answer'
     case 'TaskOutput':
       return 'reading a background task'
+    case 'TaskCreate':
+    case 'TaskUpdate':
+    case 'TaskList':
+    case 'TaskGet':
+    case 'TodoWrite':
+      return 'updating its task list'
     default:
       // savvy-progress's own report tool: the bar already says it.
       if (tool === 'step' && d === 'savvy-progress') return 'reporting progress'
@@ -392,6 +398,13 @@ export type RowLike = {
   usage: { contextPercent: number | null; costUsd: number | null } | null
 }
 
+// A session list's "Tool: detail" line (what a session last did) in plain words; anything else as it is.
+const TOOL_LINE = /^(Bash|Read|Edit|Write|MultiEdit|NotebookEdit|Grep|Glob|Agent|WebFetch|WebSearch|Skill|TaskCreate|TaskUpdate|TaskList|TaskGet|TodoWrite|TaskOutput)(?::\s+(.*))?$/
+export function plainSummary(summary: string): string {
+  const m = TOOL_LINE.exec(summary.trim())
+  return m === null ? summary : plainStep(m[1] ?? '', m[2] ?? '')
+}
+
 // The engine's word for a session's state, in plain words.
 const STATE_WORDS: Record<string, string> = { busy: 'working', working: 'working', waiting: 'waiting for you', blocked: 'blocked', idle: 'idle', done: 'finished', failed: 'failed', stopped: 'stopped' }
 export function stateWord(state: string): string {
@@ -467,7 +480,7 @@ export function buildMap(self: SelfSession, files: readonly FleetFile[], rows: r
     const status: SessionStatus = r.group === 'needs' && !isOld ? 'waiting' : r.group === 'working' ? 'running' : 'idle'
     others.push({
       sessionId: r.sessionId, name: r.name || base(r.cwd), branch: '', cwd: r.cwd, isSelf: false, hasMap: false,
-      status, doing: isOld ? `${r.summary || stateWord(r.state)} (old)` : r.summary || stateWord(r.state), why: status === 'waiting' ? (r.summary || stateWord(r.state)) : '', since: r.since,
+      status, doing: isOld ? `${plainSummary(r.summary) || stateWord(r.state)} (old)` : plainSummary(r.summary) || stateWord(r.state), why: status === 'waiting' ? (plainSummary(r.summary) || stateWord(r.state)) : '', since: r.since,
       contextPercent: r.usage?.contextPercent ?? null, costUsd: r.usage?.costUsd ?? null, nodes: [],
     })
   }

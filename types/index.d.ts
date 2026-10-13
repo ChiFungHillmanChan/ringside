@@ -228,6 +228,8 @@ export type View = {
   sel: string | null
   // A stop pressed once, waiting for the second press.
   confirm: string | null
+  // When the replay button was last pressed (absent in older state).
+  replayAt?: number | null
 }
 
 declare module 'claude-code' {

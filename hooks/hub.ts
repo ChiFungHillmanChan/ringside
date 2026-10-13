@@ -1,5 +1,5 @@
 import type { HubMember, HubMessage, HubState, MapNode } from '../types'
-import { asMapNode, stateWord } from './map'
+import { asMapNode, plainSummary, stateWord } from './map'
 
 // A session that has not written for this long has gone (closed, crashed, slept).
 export const HUB_STALE_MS = 5 * 60 * 1000
@@ -117,7 +117,7 @@ export function bareMembers(rows: readonly RowLike[], root: string, onBoard: Rea
     .filter(r => !r.isSelf && !onBoard.has(r.sessionId) && (r.cwd === root || r.cwd.startsWith(`${root}/`)))
     .map(r => ({
       sessionId: r.sessionId, name: r.name, branch: '', state: r.group === 'needs' ? 'needs' as const : r.group === 'working' ? 'working' as const : 'idle' as const,
-      doing: r.summary || stateWord(r.state), loops: 0, nextLoopAt: null, agents: 0, at: r.since, isSelf: false, isBare: true,
+      doing: plainSummary(r.summary) || stateWord(r.state), loops: 0, nextLoopAt: null, agents: 0, at: r.since, isSelf: false, isBare: true,
     }))
 }
 

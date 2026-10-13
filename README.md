@@ -151,7 +151,7 @@ Agent Map started as a personal "cockpit" pane and was redesigned around four qu
 - `hooks/fleet.ts`: the other sessions on this computer, and Jump.
 - `hooks/hub.ts`: the board files and the repo board.
 - `hooks/register.tsx`: the hooks and the pane.
-- `tests/`: 53 tests. Several mount the pane on both the terminal and desktop surfaces.
+- `tests/`: 55 tests. Several mount the pane on both the terminal and desktop surfaces.
 
 ## Develop
 

@@ -38,7 +38,8 @@ const SHOWN_LAUNCH = 12
 // A background session done or blocked for longer than this: no longer listed on the map.
 const BACKGROUND_DONE_KEEP_MS = 24 * 60 * 60 * 1000
 const SHOWN_MESSAGES = 6
-const BACKGROUND_EXPIRY_MS = 3 * 60 * 60 * 1000
+// A call still open this long never came back (its turn was cut off): no longer listed.
+const LOST_CALL_MS = 3 * 60 * 60 * 1000
 const HEARTBEAT_TICKS = 10
 const HUB_READ_TICKS = 5
 const BRANCH_TICKS = 60
@@ -223,6 +224,23 @@ export function applyTaskCall(g: Goal, tool: string, input: Fields, result: Fiel
 
 function isRunning(j: Job): boolean {
   return j.endedAt === null
+}
+
+// A background shell this session started: it runs until its notification, a
+// TaskStop, or a Stop that no longer lists it says otherwise, however long that is.
+const isOwnShell = (j: Job): boolean => j.taskId !== null && j.agentId === null
+
+// Ended work leaves after ENDED_KEEP_MS; an open call after LOST_CALL_MS, unless
+// it is a shell of this session's still running (a dev server may run all day).
+export function isStale(j: Job, at: number): boolean {
+  if (j.endedAt !== null) return at - j.endedAt > ENDED_KEEP_MS
+  return !isOwnShell(j) && at - j.startedAt > LOST_CALL_MS
+}
+
+// A Stop lists the background work the session still holds: a shell of its own
+// missing from that list has ended.
+export function endGoneShells(list: readonly Job[], held: ReadonlySet<string>, now: number): Job[] {
+  return list.map(j => (isOwnShell(j) && j.endedAt === null && !held.has(j.taskId ?? '') ? { ...j, endedAt: now } : j))
 }
 
 // Caps the list without dropping anything still running: a long background
@@ -889,13 +907,31 @@ async function refreshHub($: EngineInterface, now: number): Promise<void> {
   const last = fresh[fresh.length - 1]
   if (last !== undefined) {
     toastedAt = last.at
-    const isRecording = (await $.env.get('CLAUDE_MODS_RECORDING')) === '1'
-    const text = `Hub · ${last.fromName}: ${last.text}`
-    try {
-      await $.ui.toast(isRecording ? mask(text, recordingTerms(await $.env.get('CLAUDE_MODS_RECORDING_TERMS'))) : text)
-    } catch {
-      // Nothing draws toasts here (headless): the pane still lists it.
-    }
+    await notify($, `Hub · ${last.fromName}: ${last.text}`)
+  }
+}
+
+// A toast, masked while recording, then cut to `width` when given.
+async function notify($: EngineInterface, text: string, opts: { width?: number; timeoutMs?: number } = {}): Promise<void> {
+  const isRecording = (await $.env.get('CLAUDE_MODS_RECORDING')) === '1'
+  const masked = isRecording ? mask(text, recordingTerms(await $.env.get('CLAUDE_MODS_RECORDING_TERMS'))) : text
+  const shown = opts.width === undefined ? masked : fit(masked, opts.width)
+  try {
+    await $.ui.toast(shown, opts.timeoutMs === undefined ? undefined : { timeoutMs: opts.timeoutMs })
+  } catch {
+    // Nothing draws toasts here (headless): the pane still shows the state.
+  }
+}
+
+// Why a call the pane made did not go through: the deny, the tool's error, or
+// the rejection; null once it went through.
+async function failureOf(call: Promise<{ deny?: string; isError?: true; text?: string }>): Promise<string | null> {
+  try {
+    const ran = await call
+    if (ran.deny !== undefined) return oneLine(ran.deny)
+    return ran.isError === true ? oneLine(ran.text ?? 'the tool reported an error') : null
+  } catch (err) {
+    return oneLine(String(err))
   }
 }
 
@@ -995,7 +1031,9 @@ async function runSkill($: EngineInterface, name: string, args: string): Promise
 async function stopLoop($: EngineInterface, loop: Loop): Promise<void> {
   const id = loop.kind === 'cron' ? loop.id : loop.wakeId
   const now = await $.clock.now()
-  if (id !== null) await $.tool.call({ tool: 'CronDelete', id }).catch(() => undefined)
+  // Refused or failed, the loop still runs: it stays on the map.
+  const why = id === null ? null : await failureOf($.tool.call({ tool: 'CronDelete', id }))
+  if (why !== null) return notify($, `Could not stop the loop: ${why}`, { width: 160, timeoutMs: 8_000 })
   await update($, loopsAtom, l => endLoop(l, loop.id, now))
 }
 
@@ -1080,9 +1118,7 @@ export const register: Register = on => {
       void (async () => {
         const at = await $.clock.now()
         const list = await read($, jobs)
-        const stale = list.filter(j =>
-          (j.endedAt !== null && at - j.endedAt > ENDED_KEEP_MS) ||
-          (j.endedAt === null && at - j.startedAt > BACKGROUND_EXPIRY_MS))
+        const stale = list.filter(j => isStale(j, at))
         if (stale.length > 0) {
           const gone = new Set(stale.map(j => j.id))
           await update($, jobs, l => l.filter(j => !gone.has(j.id)))
@@ -1233,10 +1269,13 @@ export const register: Register = on => {
 
   // At the end of each turn the engine lists what will wake this session: the loops, as they stand.
   on('classic.Stop', async ($, e, next) => {
+    const now = await $.clock.now()
     const crons = e.session_crons
-    if (crons !== undefined) {
-      const now = await $.clock.now()
-      await update($, loopsAtom, l => reconcile(l, crons, now))
+    if (crons !== undefined) await update($, loopsAtom, l => reconcile(l, crons, now))
+    const tasks = e.background_tasks
+    if (tasks !== undefined) {
+      const held = new Set(tasks.map(t => t.id))
+      await update($, jobs, l => endGoneShells(l, held, now))
     }
     return next(e)
   })
@@ -1275,7 +1314,7 @@ export const register: Register = on => {
 
     if (!isQuiet) {
       const taskId = tool === 'Bash' ? str(result.backgroundTaskId) : ''
-      if (tool === 'TaskStop') {
+      if (tool === 'TaskStop' && !isError) {
         const stopped = str(input.task_id) || str(input.shell_id)
         await update($, jobs, l => l.map(j => (j.taskId === stopped && j.endedAt === null ? { ...j, endedAt } : j)))
       }
@@ -1725,8 +1764,9 @@ export const register: Register = on => {
         if (loop !== undefined) await stopLoop($, loop)
         if (shell !== undefined && shell.taskId !== null) {
           const ranAt = await $.clock.now()
-          await $.tool.call({ tool: 'TaskStop', task_id: shell.taskId } as never).catch(() => undefined)
-          await update($, jobs, l => l.map(j => (j.id === shell.id ? { ...j, endedAt: ranAt } : j)))
+          const why = await failureOf($.tool.call({ tool: 'TaskStop', task_id: shell.taskId } as never))
+          if (why !== null) await notify($, `Could not stop the shell: ${why}`, { width: 160, timeoutMs: 8_000 })
+          else await update($, jobs, l => l.map(j => (j.id === shell.id ? { ...j, endedAt: ranAt } : j)))
         }
       }
       const lt = loop === undefined ? null : loopLines(loop, now, m0.isWorking)
@@ -1797,7 +1837,7 @@ export const register: Register = on => {
     )
     const graph = !isDesktopGraph || Svg === null ? null : (() => {
       // About 8 CSS pixels a column on the desktop surfaces.
-      const art = graphSvg(map, now, width * 8)
+      const art = graphSvg(map, now, width * 8, m)
       return <Svg source={art.source} alt={`Agent map: ${map.length} session${map.length === 1 ? '' : 's'}, ${needRows.length} need you, ${working} agent${working === 1 ? '' : 's'} working`} />
     })()
     const mapTab = (

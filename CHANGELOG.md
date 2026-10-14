@@ -4,6 +4,10 @@ All notable changes to Ringside are listed here. Versions follow [semantic versi
 
 ## Unreleased
 
+- Recording mode now masks the desktop drawing too. Session names, branches and what each node is doing were shown there unmasked.
+- A Stop that is refused or fails no longer takes the loop or shell off the map. It stays listed, and a toast says why it could not be stopped. A failed `TaskStop` of Claude's own no longer ends the shell on the map either.
+- A background shell is no longer dropped after three hours while it still runs. It leaves the map when its notification arrives, when it is stopped, or when the session's next Stop no longer lists it.
+
 ## 0.9.0 (2026-10-14)
 
 Agent Map is now **Ringside**.

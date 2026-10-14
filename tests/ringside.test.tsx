@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import {
-  applyTaskCall, cellWidth, describeCall, elsewhereNeeds, groupNow, lastQuestion, mergeAgents, needOf, peekOf, presenceOf, trimJobs,
+  applyTaskCall, cellWidth, describeCall, elsewhereNeeds, endGoneShells, groupNow, isStale, lastQuestion, mergeAgents, needOf, peekOf, presenceOf, trimJobs,
 } from '../hooks/register'
 import type { HubFile } from '../hooks/hub'
 import type { AgentRow, HubMessage, Job, MainState } from '../types'
@@ -948,5 +948,117 @@ test('a session opens right under its own row, says how it is reached, and what 
   // A background session opens with claude attach instead.
   await ui.press({ key: 'session:bg-new' })
   expect(String((await ui.find({ key: 'jump:bg-new' }))?.props.label)).toBe('Open in Terminal')
+  await ui.unmount()
+})
+
+// A background shell as the Bash tool answers one: its task id, nothing waited for.
+const BACKGROUND = { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'b1' }
+
+async function shellKey(ui: { findAll: (q: { type: string }) => Promise<{ key: unknown }[]> }): Promise<string | undefined> {
+  const found = (await ui.findAll({ type: 'Button' })).find(b => String(b.key).startsWith('node:self:job:'))
+  return found === undefined ? undefined : String(found.key)
+}
+
+test('recording mode masks the desktop drawing too', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  mock.env(on, { HOME: '/Users/test', CLAUDE_MODS_RECORDING: '1', CLAUDE_MODS_RECORDING_TERMS: JSON.stringify(['falcon']) })
+  host(on)
+  on('tool.call', { tool: 'Bash' }, () => ({ result: BACKGROUND }))
+  await $.session.start({ cwd: '/Users/test/falcon-site', surface: null, isInteractive: false })
+  await $.tool.call({ tool: 'Bash', command: 'npm run dev', description: 'Serve falcon', run_in_background: true })
+  await clock.settle()
+  const desk = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const source = String((await desk.find({ type: 'Svg' }))?.props.source)
+  expect(source).toContain('[hidden]')
+  expect(source).not.toMatch(/falcon/i)
+  await desk.unmount()
+})
+
+test('a stop the engine refuses leaves the loop and the shell on the map, and says so', async ($, on) => {
+  mock.clock(on, { now: at(14, 2, 30) })
+  mock.env(on, { HOME: '/Users/test' })
+  host(on)
+  const toasts: string[] = []
+  on('ui.toast', ($, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  on('tool.call', { tool: 'CronCreate' }, () => ({ result: { id: 'c1', humanSchedule: 'Every 5 minutes', recurring: true, durable: false } }))
+  on('tool.call', { tool: 'CronDelete' }, () => ({ deny: 'The user declined' }))
+  on('tool.call', { tool: 'Bash' }, () => ({ result: BACKGROUND }))
+  on('tool.call', { tool: 'TaskStop' }, () => ({ deny: 'The user declined' }))
+  await $.session.start({ cwd: '/Users/test/proj', surface: null, isInteractive: false })
+  await $.tool.call({ tool: 'CronCreate', cron: '*/5 * * * *', prompt: '/babysit-prs', recurring: true })
+  await $.tool.call({ tool: 'Bash', command: 'npm run dev', description: 'Start the dev server', run_in_background: true })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'node:self:loop:c1' })
+  await ui.press({ key: 'loop-stop:c1' })
+  await ui.press({ key: 'loop-stop:c1' })
+  expect(await ui.find({ key: 'node:self:loop:c1' })).toBeDefined()
+  expect(toasts.some(t => /^Could not stop the loop: The user declined/.test(t))).toBe(true)
+  await ui.press({ key: 'peek-close' })
+
+  const key = await shellKey(ui)
+  expect(key).toBeDefined()
+  await ui.press({ key: String(key) })
+  const stopKey = `job-stop:${String(key).replace(/^node:self:/, '')}`
+  await ui.press({ key: stopKey })
+  await ui.press({ key: stopKey })
+  expect(await shellKey(ui)).toBe(key)
+  expect(toasts.some(t => /^Could not stop the shell: The user declined/.test(t))).toBe(true)
+  await ui.unmount()
+})
+
+test('a TaskStop of Claude\'s that fails leaves the shell running', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  mock.env(on, { HOME: '/Users/test' })
+  host(on)
+  on('tool.call', { tool: 'Bash' }, () => ({ result: BACKGROUND }))
+  let isAllowed = false
+  on('tool.call', { tool: 'TaskStop' }, ($, e) =>
+    isAllowed ? { result: { message: 'stopped', task_id: e.task_id ?? '', task_type: 'shell' } } : { deny: 'No such task' })
+  await $.session.start({ cwd: '/Users/test/proj', surface: null, isInteractive: false })
+  await $.tool.call({ tool: 'Bash', command: 'npm run dev', description: 'Start the dev server', run_in_background: true })
+  await $.tool.call({ tool: 'TaskStop', task_id: 'b1' })
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await shellKey(ui)).toBeDefined()
+  await ui.unmount()
+  isAllowed = true
+  await $.tool.call({ tool: 'TaskStop', task_id: 'b1' })
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await shellKey(ui)).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a background shell of this session is never timed out; a call that never came back is, after three hours', () => {
+  const hour = 60 * 60 * 1000
+  const at = 10 * hour
+  expect(isStale(job({ id: 'dev', taskId: 'b1', startedAt: 0 }), at)).toBe(false)
+  expect(isStale(job({ id: 'sub', taskId: 'b2', agentId: 'a1', startedAt: 0 }), at)).toBe(true)
+  expect(isStale(job({ id: 'lost', startedAt: 0 }), at)).toBe(true)
+  expect(isStale(job({ id: 'fresh', startedAt: at - hour }), at)).toBe(false)
+  expect(isStale(job({ id: 'done', startedAt: 0, endedAt: at - 60_000 }), at)).toBe(false)
+  expect(isStale(job({ id: 'old', startedAt: 0, endedAt: at - hour }), at)).toBe(true)
+  const list = [job({ id: 'dev', taskId: 'b1' }), job({ id: 'gone', taskId: 'b2' }), job({ id: 'sub', taskId: 'b3', agentId: 'a1' })]
+  expect(endGoneShells(list, new Set(['b1']), 5).map(j => j.endedAt)).toEqual([null, 5, null])
+})
+
+test('a background shell leaves the map once a Stop no longer lists it', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  mock.env(on, { HOME: '/Users/test' })
+  host(on)
+  on('tool.call', { tool: 'Bash' }, () => ({ result: BACKGROUND }))
+  await $.session.start({ cwd: '/Users/test/proj', surface: null, isInteractive: false })
+  await $.tool.call({ tool: 'Bash', command: 'npm run dev', description: 'Start the dev server', run_in_background: true })
+
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: [{ id: 'b1', type: 'shell', status: 'running', description: 'Start the dev server', command: 'npm run dev' }] })
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await shellKey(ui)).toBeDefined()
+  await ui.unmount()
+
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: [] })
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await shellKey(ui)).toBeUndefined()
   await ui.unmount()
 })

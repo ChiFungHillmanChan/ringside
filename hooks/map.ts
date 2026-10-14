@@ -523,7 +523,8 @@ const MARK: Record<NodeStatus, string> = { running: '●', waiting: '!', stuck: 
 // Sessions left, what each started right, joined by curves: one picture of the whole map.
 // A self-contained card look (its own fills) so it reads on a light or a dark desktop.
 // `maxWidth` is the pane's width in CSS pixels; the drawing takes it (within 380 to 760) so labels get the room there is.
-export function graphSvg(map: readonly MapSession[], now: number, maxWidth = 434): { source: string; height: number; width: number } {
+// `show` passes each label through before it is cut to width: recording mode's mask.
+export function graphSvg(map: readonly MapSession[], now: number, maxWidth = 434, show: (text: string) => string = t => t): { source: string; height: number; width: number } {
   const ROW = 54
   const GAP = 44
   const W = Math.max(380, Math.min(760, Math.round(maxWidth)))
@@ -536,8 +537,8 @@ export function graphSvg(map: readonly MapSession[], now: number, maxWidth = 434
   const box = (x: number, top: number, w: number, h: number, status: NodeStatus, line1: string, line2: string, clock: string, isSelf: boolean, progress: Progress | null): string => {
     const clockCells = clock === '' ? 0 : cellWidth(clock) + 1
     const room = Math.floor((w - 22) / PX)
-    const t1 = fit(`${MARK[status]} ${line1}`, room - clockCells)
-    const t2 = fit(line2, room)
+    const t1 = fit(`${MARK[status]} ${show(line1)}`, room - clockCells)
+    const t2 = fit(show(line2), room)
     const fill = status === 'waiting' ? '#fff7dd' : isSelf ? '#eef4fb' : '#ffffff'
     let bar = ''
     if (progress !== null) {

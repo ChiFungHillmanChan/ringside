@@ -26,8 +26,8 @@ You will get an answer within 7 days. Ringside is maintained by one person in th
 This helps you judge whether something is a vulnerability. Ringside runs inside Claude Code, on your computer, with your user's rights. On its own, it:
 
 - reads Claude Code's session registry (`~/.claude/sessions/`), agent files (`~/.claude/agents`, `<repo>/.claude/agents`) and this session's subagent transcripts;
-- writes one small file per session under `~/.claude/mods-data/ringside/`, and reads the files other sessions write there;
-- keeps that folder private (`chmod 700`), and deletes board files in it that have not been written for a week (`find … -delete`, inside `~/.claude/mods-data/ringside/hub/` only);
+- writes one small file per session under `~/.claude/mods-data/ringside/` (what the session is doing, what it started, and the question it waits on with its choices), and reads the files other sessions write there;
+- keeps that folder private (`chmod 700`), and deletes board files in it that have not been written for a week, and then the empty folders (`find … -delete`, inside `~/.claude/mods-data/ringside/hub/` only);
 - runs `ps` and `git rev-parse`;
 - makes no network requests and calls no model.
 

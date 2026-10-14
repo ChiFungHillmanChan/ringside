@@ -81,3 +81,31 @@ test('no cards when the answer does not end on a question, or the question offer
   expect(replyAskOf('What do you think?')).toBeNull()
   expect(replyAskOf('Here:\n```\nwhy?\n```\nDone.')).toBeNull()
 })
+
+test('an answer that only mentions a question, or ends on a statement, is not waiting on the person', () => {
+  expect(replyAskOf('Why did it fail? The cache was stale.\n\n1. Cleared the cache\n2. Re-ran tests\n\nAll green now.')).toBeNull()
+  expect(replyAskOf('## Why did it break?\n\n- the cache\n- the lock\n\nBoth are fixed.')).toBeNull()
+  expect(replyAskOf('## Which one?\n\n- a\n- b')).toBeNull()
+  expect(replyAskOf('**What changed?**\n\n1. the parser\n2. the tests\n\nTests pass.')).toBeNull()
+  expect(replyAskOf('Results at https://ci/x?run=5\n\n1. lint ok\n2. tests ok')).toBeNull()
+})
+
+test('"use A or B?" names both; an "or" that cannot be split shows no cards, never a wrong Yes or No', () => {
+  expect(labels('Should I use Postgres or SQLite?')).toEqual(['Use Postgres', 'Use SQLite'])
+  expect(labels('Should I merge now or wait for review?')).toEqual(['Merge now', 'Wait for review'])
+  expect(replyAskOf('Should I keep it, or drop it, or wait, or ask?')).toBeNull()
+})
+
+test('a list above "Which tests should I run?" is not its choices; "Do you prefer …?" is a yes or no', () => {
+  expect(replyAskOf('I changed:\n- a.ts\n- b.ts\n\nWhich tests should I run?')).toBeNull()
+  expect(labels('Here is what changed:\n- Renamed foo\n- Dropped flag\n\nDo you prefer the new names?')).toEqual(['Yes', 'No'])
+})
+
+test('sub-points under an item are its detail; checkboxes and ~~~ code blocks are read right', () => {
+  expect(replyAskOf('Which plan?\n1. **Small**\n   - one file\n   - no tests\n2. **Full**\n   - every file')?.choices).toEqual([
+    { label: 'Small', detail: 'one file; no tests' },
+    { label: 'Full', detail: 'every file' },
+  ])
+  expect(labels('Which next?\n- [ ] write tests\n- [x] ship')).toEqual(['write tests', 'ship'])
+  expect(replyAskOf('Here:\n~~~\nwhy?\n~~~\nDone.')).toBeNull()
+})

@@ -1,11 +1,11 @@
-// What a running call is blocked on: the person answering a question or
-// approving a plan.
 // One choice Claude offered: its words, and what choosing it leads to ('' when it says nothing more).
 export type Choice = { label: string; detail: string }
 
 // A question Claude asked with choices: one of AskUserQuestion's, or the question its answer ended on.
 export type Ask = { question: string; header: string; choices: Choice[]; isMulti: boolean }
 
+// What a running call is blocked on: the person answering a question or
+// approving a plan.
 export type Need = {
   kind: 'question' | 'plan'
   text: string

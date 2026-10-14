@@ -8,7 +8,7 @@ import {
   addCard, adoptCards, agentFromMarkdown, callerOf, catalogSections, dotColor, filterCatalog, finishCard, mergeOffer, newCard, noteStep, PENDING_ID, pruneCards, purposeOf,
   replaceSkills, roleFor, skillsFrom, typeOf,
 } from './agents'
-import { answersOf, asksOfInput, pick as pickChoice, replyAskOf } from './asks'
+import { answersFor, answersOf, asksOfInput, pick as pickChoice, replyAskOf } from './asks'
 import { asHubFile, bareMembers, HUB_STALE_MS, hubDir, hubNote, hubReport, newMessage, NODES_MAX, pushOutbox, readHub, resolveRecipient, unread } from './hub'
 import type { HubFile } from './hub'
 import { adaptHidden, adaptSessionRows, FOCUS_ITERM, FOCUS_TERMINAL, OPEN_ITERM, OPEN_TERMINAL, parsePs, rowsFromRegistry, shellQuote, TMUX_PANES, tmuxPaneOn } from './fleet'
@@ -512,7 +512,8 @@ let tmuxBin: string | null | undefined
 
 // A new window running `command`, in iTerm2 when that is the person's terminal, else Terminal.
 async function openWindow($: EngineInterface, command: string): Promise<string> {
-  const isIterm = (await $.env.get('TERM_PROGRAM')) === 'iTerm.app'
+  // Inside tmux TERM_PROGRAM says tmux; iTerm2 still sets LC_TERMINAL.
+  const isIterm = (await $.env.get('TERM_PROGRAM')) === 'iTerm.app' || (await $.env.get('LC_TERMINAL')) === 'iTerm2'
   return osa($, isIterm ? OPEN_ITERM : OPEN_TERMINAL, [command])
 }
 
@@ -649,14 +650,19 @@ async function refreshAgents($: EngineInterface, now: number): Promise<void> {
   if (JSON.stringify(kept) !== JSON.stringify(cardList)) await update($, cardsAtom, () => kept)
 }
 
+// When each subagent's transcript was last read.
+const peekReadAt = new Map<string, number>()
+
 async function refreshPeek($: EngineInterface): Promise<void> {
   const current = await read($, peek)
   const agentId = current.agentId
   if (agentId === null) return
-  // A finished subagent's transcript no longer changes: read once, not every few seconds.
+  // A finished subagent's transcript no longer changes: once read after it ended, it is left alone.
   const row = (await read($, agents)).find(a => a.id === agentId)
-  if (row !== undefined && row.endedAt !== null && (current.task !== '' || current.lines.length > 0 || current.error !== '')) return
+  const now = await $.clock.now()
+  if (row !== undefined && row.endedAt !== null && (peekReadAt.get(agentId) ?? -1) > row.endedAt) return
   const found = await $.session.messages({ agentId })
+  peekReadAt.set(agentId, now)
   const next: Peek = 'deny' in found
     ? { ...current, error: 'Its transcript cannot be read from here.' }
     : { agentId, ...peekOf(found), error: '' }
@@ -998,20 +1004,31 @@ async function tidyBoard($: EngineInterface, claudeDir: string): Promise<void> {
 }
 
 // Claude's questions waiting on the person, by call: a card pressed in the pane answers one.
-const askWaiters = new Map<string, (answers: Record<string, string>) => void>()
+const askWaiters = new Map<string, (picks: Record<number, readonly string[]>) => void>()
+// When each question's cards were first drawn: a press in the first moment may be
+// aimed at a row the cards just pushed down, so it does not answer.
+const askShownAt = new Map<string, number>()
+const ASK_SETTLE_MS = 700
 
 async function dialogOrPane(id: string, input: Fields, dialog: () => Promise<ToolCallResult>): Promise<ToolCallResult> {
   const shown = dialog()
-  const picked = new Promise<Record<string, string>>(resolve => askWaiters.set(id, resolve))
+  const picked = new Promise<Record<number, readonly string[]>>(resolve => askWaiters.set(id, resolve))
   try {
-    const won = await Promise.race([shown.then(r => ({ r })), picked.then(answers => ({ answers }))])
+    const won = await Promise.race([shown.then(r => ({ r })), picked.then(picks => ({ picks }))])
     if ('r' in won) return won.r
     // Answered from the pane: returning now closes the dialog, its call cut off beneath.
     shown.catch(() => undefined)
-    return { result: { questions: input.questions, answers: won.answers } }
+    return { result: { questions: input.questions, answers: answersFor(input, won.picks) } }
   } finally {
     askWaiters.delete(id)
+    askShownAt.delete(id)
   }
+}
+
+// Picks for a question no longer asked, gone from the view.
+async function clearPicks($: EngineInterface, callId: string): Promise<void> {
+  if (!Object.keys((await read($, viewAtom)).picks ?? {}).some(k => k.startsWith(`${callId}:`))) return
+  await update($, viewAtom, v => ({ ...v, picks: Object.fromEntries(Object.entries(v.picks ?? {}).filter(([k]) => !k.startsWith(`${callId}:`))) }))
 }
 
 // Stops sent and not answered yet, by node: a second press sends no second stop.
@@ -1424,6 +1441,7 @@ export const register: Register = on => {
 
     // Claude's question: answered in its dialog, or from a card in the pane, whichever comes first.
     const ran = tool === 'AskUserQuestion' && !isQuiet ? await dialogOrPane(id, input, () => next(e)) : await next(e)
+    if (tool === 'AskUserQuestion') await clearPicks($, id)
     const endedAt = await $.clock.now()
     const isError = ran.deny !== undefined || ran.isError === true
     const result = (ran.deny === undefined && ran.isError !== true ? (ran.result ?? {}) : {}) as Fields
@@ -1570,17 +1588,21 @@ export const register: Register = on => {
     }
 
     // ---- Claude's choices as cards ----
-    const clearPicks = (callId: string) => update($, viewAtom, v => ({ ...v, picks: Object.fromEntries(Object.entries(v.picks ?? {}).filter(([k]) => !k.startsWith(`${callId}:`))) }))
-    // The person's answer to a question of this session's Claude, handed to the call that waits on it.
-    const sendAnswers = async (callId: string, asks: readonly Ask[], byIndex: Record<number, readonly string[]>): Promise<void> => {
-      const answers = answersOf(asks, byIndex)
-      if (answers === null) return
+    // Too soon after the cards appeared: the press was likely aimed at what they pushed down.
+    const isSettling = async (callId: string): Promise<boolean> => (await $.clock.now()) - (askShownAt.get(callId) ?? 0) < ASK_SETTLE_MS
+    // The person's answer to a question of this session's Claude, handed to the call that waits on it;
+    // without `given`, the picks as they stand now.
+    const sendAnswers = async (callId: string, asks: readonly Ask[], given?: Record<number, readonly string[]>): Promise<void> => {
+      if (await isSettling(callId)) return
+      const v = await read($, viewAtom)
+      const byIndex = given ?? Object.fromEntries(asks.map((_, qi) => [qi, v.picks?.[`${callId}:${qi}`] ?? []]))
+      if (answersOf(asks, byIndex) === null) return
       const answer = askWaiters.get(callId)
-      await clearPicks(callId)
+      await clearPicks($, callId)
       if (answer === undefined) return notify($, 'That question was already answered.', { timeoutMs: 4_000 })
-      answer(answers)
+      answer(byIndex)
     }
-    const pressChoice = (r: NeedRow, qi: number, c: Choice, chosen: readonly string[]) => async (): Promise<void> => {
+    const pressChoice = (r: NeedRow, qi: number, c: Choice) => async (): Promise<void> => {
       const ask = r.asks?.[qi]
       if (ask === undefined) return
       if (r.mode === 'prompt') {
@@ -1590,10 +1612,11 @@ export const register: Register = on => {
       if (r.mode === 'jump' && r.sessionId !== undefined) return startJump($, r.sessionId)
       if (r.mode !== 'answer' || r.callId === undefined) return
       const callId = r.callId
-      const next = pickChoice(chosen, c.label, ask.isMulti)
       // One question, one choice: the press is the answer.
-      if ((r.asks?.length ?? 0) === 1 && !ask.isMulti) return sendAnswers(callId, r.asks ?? [], { 0: next })
-      await update($, viewAtom, v => ({ ...v, picks: { ...(v.picks ?? {}), [`${callId}:${qi}`]: next } }))
+      if ((r.asks?.length ?? 0) === 1 && !ask.isMulti) return sendAnswers(callId, r.asks ?? [], { 0: [c.label] })
+      if (await isSettling(callId)) return
+      const key = `${callId}:${qi}`
+      await update($, viewAtom, v => ({ ...v, picks: { ...(v.picks ?? {}), [key]: pickChoice(v.picks?.[key] ?? [], c.label, ask.isMulti) } }))
     }
     // Each question's choices as cards, two to a row where there is room: the label, then what it leads to.
     const choiceCards = (r: NeedRow) => {
@@ -1611,6 +1634,7 @@ export const register: Register = on => {
         ? (needsSend ? 'Pick for each question, then send.' : 'Press one to answer, or answer in the dialog.')
         : r.mode === 'prompt' ? 'Press one to put it in your prompt.' : 'Jump there to answer.'
       const callId = r.callId
+      if (r.mode === 'answer' && callId !== undefined && !askShownAt.has(callId)) askShownAt.set(callId, now)
       return (
         <Box key={`asks:${r.key}`} flexDirection="column" marginLeft={2}>
           {asks.map((a, qi) => {
@@ -1618,13 +1642,18 @@ export const register: Register = on => {
             for (let i = 0; i < a.choices.length; i += cols) rows.push(a.choices.slice(i, i + cols))
             const chosen = picksOf(qi)
             const head = asks.length > 1 ? a.question : ''
+            // The chip, the question and "(pick any)" share one line: what does not fit goes, the question last.
+            const chip = a.header === '' ? '' : fit(m(a.header), 14)
+            const any = a.isMulti && inner >= 30 ? ' (pick any)' : ''
+            const showChip = chip !== '' && (head === '' || inner - cellWidth(chip) - 1 - any.length >= 8)
+            const qRoom = inner - (showChip ? cellWidth(chip) + 1 : 0) - any.length
             return (
               <Box key={`ask:${r.key}:${qi}`} flexDirection="column">
-                {(head !== '' || a.header !== '' || a.isMulti) && (
+                {(head !== '' || showChip || any !== '') && (
                   <Box>
-                    {a.header !== '' && <Text color="yellow">{`${fit(m(a.header), 14)} `}</Text>}
-                    {head !== '' && <Text>{fit(m(head), Math.max(8, inner - (a.header === '' ? 0 : Math.min(cellWidth(a.header), 14) + 1) - (a.isMulti ? 12 : 0)))}</Text>}
-                    {a.isMulti && <Text dimColor>{' (pick any)'}</Text>}
+                    {showChip && <Text color="yellow">{`${chip} `}</Text>}
+                    {head !== '' && <Text>{fit(m(head), Math.max(1, qRoom))}</Text>}
+                    {any !== '' && <Text dimColor>{any}</Text>}
                   </Box>
                 )}
                 {a.choices.length === 0 && <Text dimColor>{fit('Answer this one in the dialog.', inner)}</Text>}
@@ -1636,7 +1665,7 @@ export const register: Register = on => {
                       const lines = c.detail === '' ? [] : wrap(m(c.detail), room, 2)
                       return (
                         <Box key={`choice:${r.key}:${qi}:${n}`} width={cardW} flexDirection="column" borderStyle="round" borderColor={isOn ? 'claude' : 'gray'} borderDimColor={!isOn} hover={{ borderColor: 'claude', borderDimColor: false }} paddingX={1}>
-                          <Button key={`pick:${r.key}:${qi}:${n}`} plain label={fit(`${isOn ? '✓' : `${n}.`} ${m(c.label)}`, room)} onPress={pressChoice(r, qi, c, chosen)} />
+                          <Button key={`pick:${r.key}:${qi}:${n}`} plain label={fit(`${isOn ? '✓' : `${n}.`} ${m(c.label)}`, room)} onPress={pressChoice(r, qi, c)} />
                           {lines.map((l, i) => <Text key={`choiced:${r.key}:${qi}:${n}:${i}`} dimColor>{l}</Text>)}
                         </Box>
                       )
@@ -1648,7 +1677,7 @@ export const register: Register = on => {
           })}
           <Box gap={1}>
             {needsSend && callId !== undefined && (
-              <Button key={`send:${r.key}`} variant={isReady ? 'primary' : undefined} dimColor={!isReady} label="Send answers" onPress={() => (isReady ? sendAnswers(callId, asks, byIndex) : Promise.resolve())} />
+              <Button key={`send:${r.key}`} variant={isReady ? 'primary' : undefined} dimColor={!isReady} label="Send answers" onPress={() => (isReady ? sendAnswers(callId, asks) : Promise.resolve())} />
             )}
             <Text dimColor>{fit(hint, needsSend ? Math.max(8, inner - 16) : inner)}</Text>
           </Box>

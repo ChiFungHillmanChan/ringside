@@ -254,6 +254,7 @@ When Claude asks you to choose, Ringside draws each choice as a card under NEEDS
 ```
 NEEDS YOU
 ? Which database?                                                  0:12
+  DB
   ╭──────────────────────────────────╮ ╭──────────────────────────────────╮
   │ 1. Postgres                      │ │ 2. SQLite                        │
   │ Relational, runs anywhere        │ │ One file, no server              │
@@ -267,7 +268,7 @@ NEEDS YOU
 | The question Claude's answer ends on: a numbered or bulleted list right after it, `…, or …?` in the question itself, or a plain "Want me to …?" (Yes and No) | puts that choice into your prompt at the cursor, keeping what you had typed. Nothing is sent until you press Enter. |
 | Another session's question | jumps to that session. No session answers another one's question. |
 
-Another session's question at the end of its answer stays in the pane. Above the prompt, only a question that holds a session up is shown.
+A press in the first moment after the cards appear does not answer, so a click aimed at a row they just pushed down cannot answer Claude by accident. Another session's question at the end of its answer stays in the pane. Above the prompt, only a question that holds a session up is shown.
 
 ### Peek: look inside anything
 
@@ -518,7 +519,7 @@ hooks/
   mask.ts        masks personal details on screen while CLAUDE_MODS_RECORDING=1 is set
 types/
   index.d.ts     the shape of everything Ringside keeps in Claude Code's state
-tests/           87 tests; several mount the pane on both the terminal and desktop surfaces
+tests/           97 tests; several mount the pane on both the terminal and desktop surfaces
 ```
 
 Each session that runs Ringside publishes a small file about itself (its state, what it is doing, what it started). Every session reads the others' files and Claude Code's own session registry, and draws the map from both.

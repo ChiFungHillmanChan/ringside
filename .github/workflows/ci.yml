@@ -10,9 +10,16 @@ permissions:
 
 jobs:
   check:
-    name: Validate and test
-    runs-on: ubuntu-latest
+    name: Validate and test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    env:
+      # The Claude Code release Ringside is tested against. Raise it on purpose, after a run passes.
+      CLAUDE_CODE_VERSION: 2.1.299
     steps:
       - uses: actions/checkout@v7
 
@@ -21,7 +28,7 @@ jobs:
           node-version: 22
 
       - name: Install Claude Code
-        run: npm install -g @anthropic-ai/claude-code
+        run: npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 
       - name: Claude Code version
         run: claude --version

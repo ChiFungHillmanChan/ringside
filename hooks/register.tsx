@@ -1,16 +1,17 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, ToolCallResult } from 'claude-code'
 
 import type {
-  AgentCard, AgentRow, CatalogEntry, FleetFile, Goal, Hub, HubMessage, HubState, Job, JumpNote, Launch, Loop, MainState, Need, Peek, PeekLine, SessionRow, Task, View,
+  AgentCard, AgentRow, Ask, CatalogEntry, Choice, FleetFile, Goal, Hub, HubMessage, HubState, Job, JumpNote, Launch, Loop, MainState, Need, NeedKind, Peek, PeekLine, SessionRow, Task, View,
 } from '../types'
 import {
   addCard, adoptCards, agentFromMarkdown, callerOf, catalogSections, dotColor, filterCatalog, finishCard, mergeOffer, newCard, noteStep, PENDING_ID, pruneCards, purposeOf,
   replaceSkills, roleFor, skillsFrom, typeOf,
 } from './agents'
+import { answersOf, asksOfInput, pick as pickChoice, replyAskOf } from './asks'
 import { asHubFile, bareMembers, HUB_STALE_MS, hubDir, hubNote, hubReport, newMessage, NODES_MAX, pushOutbox, readHub, resolveRecipient, unread } from './hub'
 import type { HubFile } from './hub'
-import { adaptHidden, adaptSessionRows, FOCUS_ITERM, FOCUS_TERMINAL, OPEN_TERMINAL, parsePs, rowsFromRegistry, shellQuote, TMUX_PANES, tmuxPaneOn } from './fleet'
+import { adaptHidden, adaptSessionRows, FOCUS_ITERM, FOCUS_TERMINAL, OPEN_ITERM, OPEN_TERMINAL, parsePs, rowsFromRegistry, shellQuote, TMUX_PANES, tmuxPaneOn } from './fleet'
 import { activeLoops, addCron, addWakeup, endLoop, fired, pruneLoops, reconcile } from './loops'
 import {
   adaptFlightAgents, adaptFlightLoops, adaptSavvy, autoZoom, buildMap, cellWidth, dur, fit, graphSvg, needsOf, plainStep, selfNodes, span, stateWord, stuckReason, wrap,
@@ -43,12 +44,15 @@ const LOST_CALL_MS = 3 * 60 * 60 * 1000
 const HEARTBEAT_TICKS = 10
 const HUB_READ_TICKS = 5
 const BRANCH_TICKS = 60
+const TIDY_TICKS = 60 * 60
+// A board file not written for this many days is a session long gone.
+const BOARD_KEEP_DAYS = 7
 const REGISTRY_RESCAN_MS = 30_000
 const SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 // Instant bookkeeping tools: shown as task progress instead of as jobs.
 const QUIET = new Set(['TodoWrite', 'TaskCreate', 'TaskUpdate', 'TaskList', 'TaskGet', 'ToolSearch'])
 const ENDED_AGENT = new Set(['completed', 'failed', 'killed', 'ended'])
-const IDLE_MAIN: MainState = { isWorking: false, since: null, reply: null, waiting: null, waitingAt: null }
+const IDLE_MAIN: MainState = { isWorking: false, since: null, reply: null, replyAsk: null, waiting: null, waitingAt: null }
 const NO_PEEK: Peek = { agentId: null, task: '', lines: [], error: '' }
 const NO_LAUNCH: Launch = { isOpen: false, kind: 'agent', query: '', picked: null, note: '' }
 const NO_HUB: Hub = { root: '', label: '', branch: '', members: [], messages: [], to: 'all', wake: false, note: '' }
@@ -172,7 +176,8 @@ export function needOf(tool: string, input: Fields): Need | null {
   if (tool === 'AskUserQuestion') {
     const first = Array.isArray(input.questions) ? (input.questions[0] as Fields | undefined) : undefined
     const question = oneLine(str(first?.question))
-    return { kind: 'question', text: question === '' ? "Answer Claude's question" : question }
+    const asks = asksOfInput(input)
+    return { kind: 'question', text: question === '' ? "Answer Claude's question" : question, ...(asks.some(a => a.choices.length > 0) ? { asks } : {}) }
   }
   if (tool === 'ExitPlanMode') return { kind: 'plan', text: 'Approve or change the plan' }
   return null
@@ -296,6 +301,9 @@ export type NowRow = {
   agentId?: string
   // Another session waiting on the person: a press jumps to it.
   sessionId?: string
+  // The question's choices, drawn as cards; `callId` is the call a pick answers.
+  asks?: Ask[]
+  callId?: string
 }
 
 export type NowGroups = { needs: NowRow[]; running: NowRow[]; ended: NowRow[]; quick: number; idleAgents: number }
@@ -321,6 +329,7 @@ export function groupNow(jobList: readonly Job[], agentList: readonly AgentRow[]
       key: `need:${j.id}`, tone: 'need', glyph: j.need.kind === 'plan' ? '!' : '?',
       text: `${owner}${j.need.text}`, from: j.startedAt, to: null, depth: 0,
       ...(j.agentId === null ? {} : { agentId: j.agentId }),
+      ...(j.need.asks === undefined || j.need.asks.length === 0 ? {} : { asks: j.need.asks, callId: j.id }),
     })
   }
   for (const a of agentList) {
@@ -332,7 +341,8 @@ export function groupNow(jobList: readonly Job[], agentList: readonly AgentRow[]
     needs.push({ key: 'need:waiting', tone: 'need', glyph: '!', text: `Claude is waiting: ${m.waiting}`, from: m.waitingAt, to: null, depth: 0 })
   }
   if (!m.isWorking && m.reply !== null) {
-    needs.push({ key: 'need:reply', tone: 'need', glyph: '>', text: `Reply: ${m.reply}`, from: m.since, to: null, depth: 0 })
+    const ask = m.replyAsk ?? null
+    needs.push({ key: 'need:reply', tone: 'need', glyph: '>', text: `Reply: ${m.reply}`, from: m.since, to: null, depth: 0, ...(ask === null ? {} : { asks: [ask] }) })
   }
 
   for (const j of jobList) {
@@ -440,10 +450,11 @@ export function loopLines(l: Loop, now: number, isWorking: boolean): { head: str
 }
 
 // What this session tells the rest of the repo it is doing.
-export function presenceOf(m: MainState, jobList: readonly Job[], g: Goal, agentList: readonly AgentRow[]): { state: HubState; doing: string } {
+export function presenceOf(m: MainState, jobList: readonly Job[], g: Goal, agentList: readonly AgentRow[]): { state: HubState; doing: string; needKind?: NeedKind; asks?: Ask[] } {
   const groups = groupNow(jobList, agentList, m)
   const need = groups.needs[0]
-  if (need !== undefined) return { state: 'needs', doing: need.text }
+  // The other maps draw its choices as cards; only the question an answer ended on is a 'reply'.
+  if (need !== undefined) return { state: 'needs', doing: need.text, needKind: need.key === 'need:reply' ? 'reply' : 'ask', asks: need.asks ?? [] }
   const task = g.tasks.find(t => t.status === 'in_progress')
   if (m.isWorking || groups.running.length > 0 || agentList.some(a => a.endedAt === null && a.status === 'running')) {
     // In the same plain words as the session's own card ("running tests", "reading auth.ts").
@@ -499,6 +510,12 @@ async function osa($: EngineInterface, lines: readonly string[], args: readonly 
 
 let tmuxBin: string | null | undefined
 
+// A new window running `command`, in iTerm2 when that is the person's terminal, else Terminal.
+async function openWindow($: EngineInterface, command: string): Promise<string> {
+  const isIterm = (await $.env.get('TERM_PROGRAM')) === 'iTerm.app'
+  return osa($, isIterm ? OPEN_ITERM : OPEN_TERMINAL, [command])
+}
+
 async function findTmux($: EngineInterface): Promise<string | null> {
   if (tmuxBin !== undefined) return tmuxBin
   tmuxBin = null
@@ -534,7 +551,7 @@ async function focusTmux($: EngineInterface, tty: string): Promise<string> {
     (await runQuiet($, [tmux, 'select-pane', '-t', hit.paneId])).code === 0
   const clients = await runQuiet($, [tmux, 'list-clients', '-t', hit.session, '-F', '#{client_tty}'])
   const clientTty = clients.out.split('\n')[0]?.trim() ?? ''
-  if (clientTty === '') return osa($, OPEN_TERMINAL, [`${tmux} attach -t ${shellQuote(hit.session)}`])
+  if (clientTty === '') return openWindow($, `${tmux} attach -t ${shellQuote(hit.session)}`)
   const raised = await focusTty($, clientTty)
   // Shown in its tmux window even where no terminal app can be brought forward (Linux, other terminals).
   return raised === 'ok' ? 'ok' : isShown ? 'tmux' : raised
@@ -552,7 +569,7 @@ async function jumpTo($: EngineInterface, sessionId: string): Promise<void> {
   await update($, viewAtom, v => ({ ...v, jump: { sessionId, at: 0, isOk: true, text: 'Bringing it forward…' } }))
   let result = 'none'
   if (row !== undefined && row.jobId !== null) {
-    result = await osa($, OPEN_TERMINAL, [`claude attach ${shellQuote(row.jobId)}`])
+    result = await openWindow($, `claude attach ${shellQuote(row.jobId)}`)
   } else if (row !== undefined && row.tty !== null) {
     result = await focusTty($, row.tty)
     if (result !== 'ok') {
@@ -568,7 +585,7 @@ async function jumpTo($: EngineInterface, sessionId: string): Promise<void> {
         : row.jobId !== null && hasOsa === false ? ': opening a new terminal window works on macOS only'
           : ': its terminal window was not found (Terminal, iTerm2 and tmux were checked)'
   const note: JumpNote = result === 'ok'
-    ? { sessionId, at, isOk: true, text: row?.jobId != null ? `Opened ${name} in a new Terminal window` : `Switched to ${name}'s terminal (${(row?.tty ?? '').replace('/dev/', '')})` }
+    ? { sessionId, at, isOk: true, text: row?.jobId != null ? `Opened ${name} in a new window` : `Switched to ${name}'s terminal (${(row?.tty ?? '').replace('/dev/', '')})` }
     : result === 'tmux'
       ? { sessionId, at, isOk: true, text: `Showed ${name}'s pane in its tmux window` }
       : { sessionId, at, isOk: false, text: `Could not bring ${name} forward${why}` }
@@ -636,6 +653,9 @@ async function refreshPeek($: EngineInterface): Promise<void> {
   const current = await read($, peek)
   const agentId = current.agentId
   if (agentId === null) return
+  // A finished subagent's transcript no longer changes: read once, not every few seconds.
+  const row = (await read($, agents)).find(a => a.id === agentId)
+  if (row !== undefined && row.endedAt !== null && (current.task !== '' || current.lines.length > 0 || current.error !== '')) return
   const found = await $.session.messages({ agentId })
   const next: Peek = 'deny' in found
     ? { ...current, error: 'Its transcript cannot be read from here.' }
@@ -832,7 +852,11 @@ async function refreshFleet($: EngineInterface, now: number): Promise<void> {
       if (entry.kind !== 'file' || !entry.name.endsWith('.json') || now - entry.mtimeMs > HUB_STALE_MS) continue
       const f = asHubFile(await readJson($, `${top}/${dir.name}/${entry.name}`))
       if (f === null || f.ended || f.sessionId === own || now - f.heartbeatAt > HUB_STALE_MS) continue
-      found.push({ sessionId: f.sessionId, name: f.name, cwd: f.cwd, branch: f.branch, state: f.state, doing: f.doing, stuck: f.stuck ?? '', heartbeatAt: f.heartbeatAt, nodes: f.nodes ?? [] })
+      found.push({
+        sessionId: f.sessionId, name: f.name, cwd: f.cwd, branch: f.branch, state: f.state, doing: f.doing, stuck: f.stuck ?? '', heartbeatAt: f.heartbeatAt, nodes: f.nodes ?? [],
+        ...(f.needKind === undefined ? {} : { needKind: f.needKind }),
+        ...(f.asks === undefined ? {} : { asks: f.asks }),
+      })
     }
   }
   found.sort((a, b) => a.sessionId.localeCompare(b.sessionId))
@@ -873,6 +897,7 @@ async function writePresence($: EngineInterface, now: number, isEnded = false): 
     branch: h.branch,
     state: presence.state,
     doing: presence.doing,
+    ...(presence.needKind === undefined ? {} : { needKind: presence.needKind, asks: presence.asks ?? [] }),
     loops: live.length,
     nextLoopAt: nexts.length === 0 ? null : Math.min(...nexts),
     agents: (await read($, agents)).filter(a => a.endedAt === null && a.status !== 'idle').length,
@@ -956,6 +981,36 @@ async function stopOutcome(call: Promise<{ deny?: string; isError?: true; text?:
     return stopOutcomeOf(await call)
   } catch (err) {
     return { kind: 'refused', why: oneLine(err instanceof Error ? err.message : String(err)) || 'it failed' }
+  }
+}
+
+// Ringside's own folder: the person's alone (the board files say what each session works on,
+// which a shared computer's other users must not read), keeping a week of board files.
+async function tidyBoard($: EngineInterface, claudeDir: string): Promise<void> {
+  if (claudeDir === '') return
+  const dir = `${claudeDir}/mods-data/ringside`
+  if (!(await $.fs.exists(dir).catch(() => false))) return
+  await runQuiet($, ['chmod', '700', dir], 3_000)
+  const hub = `${dir}/hub`
+  if (!(await $.fs.exists(hub).catch(() => false))) return
+  await runQuiet($, ['find', hub, '-type', 'f', '-name', '*.json', '-mtime', `+${BOARD_KEEP_DAYS}`, '-delete'], 10_000)
+  await runQuiet($, ['find', hub, '-mindepth', '1', '-type', 'd', '-empty', '-delete'], 10_000)
+}
+
+// Claude's questions waiting on the person, by call: a card pressed in the pane answers one.
+const askWaiters = new Map<string, (answers: Record<string, string>) => void>()
+
+async function dialogOrPane(id: string, input: Fields, dialog: () => Promise<ToolCallResult>): Promise<ToolCallResult> {
+  const shown = dialog()
+  const picked = new Promise<Record<string, string>>(resolve => askWaiters.set(id, resolve))
+  try {
+    const won = await Promise.race([shown.then(r => ({ r })), picked.then(answers => ({ answers }))])
+    if ('r' in won) return won.r
+    // Answered from the pane: returning now closes the dialog, its call cut off beneath.
+    shown.catch(() => undefined)
+    return { result: { questions: input.questions, answers: won.answers } }
+  } finally {
+    askWaiters.delete(id)
   }
 }
 
@@ -1165,6 +1220,8 @@ export const register: Register = on => {
     } catch {
       // The board or the catalog could not be read; the next ticks try again.
     }
+    // Ringside's folder kept private and tidy, off the start's path.
+    $.clock.after(0, () => void tidyBoard($, claudeDir).catch(() => undefined))
 
     let ticks = 0
     $.clock.every(1000, () => {
@@ -1187,6 +1244,7 @@ export const register: Register = on => {
         if (ticks % HUB_READ_TICKS === 0) await refreshSessions($, at).catch(() => undefined)
         if (ticks % HEARTBEAT_TICKS === 0) await writePresence($, at)
         if (ticks % BRANCH_TICKS === 0) await refreshRepo($, await read($, cwdAtom))
+        if (ticks % TIDY_TICKS === 0) await tidyBoard($, await read($, homeAtom)).catch(() => undefined)
         const loopList = await read($, loopsAtom)
         if (ticks % 30 === 0 && pruneLoops(loopList, at).length !== loopList.length) await update($, loopsAtom, l => pruneLoops(l, at))
         const shown = (await $.ui.panes().catch(() => [])).some(p => p.id === PANE && p.isShown && p.isPlaced)
@@ -1260,7 +1318,7 @@ export const register: Register = on => {
     if (e.origin.kind === 'scheduled-trigger') await update($, loopsAtom, l => fired(l, e.text, now))
     // The person answered: the question Claude ended on is no longer theirs to answer.
     if (e.origin.kind === 'composer' && (await read($, main)).reply !== null) {
-      await update($, main, s => ({ ...s, reply: null }))
+      await update($, main, s => ({ ...s, reply: null, replyAsk: null }))
     }
     // Board notes from other sessions in this repo the model has not read: handed over with this prompt.
     const h = await read($, hubAtom)
@@ -1277,15 +1335,18 @@ export const register: Register = on => {
 
   on('turn.start', async ($, e, next) => {
     const now = await $.clock.now()
-    await update($, main, s => ({ ...s, isWorking: true, since: now, reply: null }))
+    await update($, main, s => ({ ...s, isWorking: true, since: now, reply: null, replyAsk: null }))
     return next(e)
   })
 
   on('turn.complete', async ($, e, next) => {
     const now = await $.clock.now()
     if (e.agentId === undefined) {
-      const reply = e.reason === 'answer' && !e.isAborted ? lastQuestion(e.answer) : null
-      await update($, main, s => ({ ...s, isWorking: false, since: now, reply }))
+      const isAnswer = e.reason === 'answer' && !e.isAborted
+      // The question it ended on, and the choices it offered: drawn as cards under it.
+      const replyAsk = isAnswer ? replyAskOf(e.answer) : null
+      const reply = isAnswer ? replyAsk?.question ?? lastQuestion(e.answer) : null
+      await update($, main, s => ({ ...s, isWorking: false, since: now, reply, replyAsk }))
     } else {
       const agentId = e.agentId
       if ((await read($, cardsAtom)).some(c => c.id === agentId)) {
@@ -1361,7 +1422,8 @@ export const register: Register = on => {
       }
     }
 
-    const ran = await next(e)
+    // Claude's question: answered in its dialog, or from a card in the pane, whichever comes first.
+    const ran = tool === 'AskUserQuestion' && !isQuiet ? await dialogOrPane(id, input, () => next(e)) : await next(e)
     const endedAt = await $.clock.now()
     const isError = ran.deny !== undefined || ran.isError === true
     const result = (ran.deny === undefined && ran.isError !== true ? (ran.result ?? {}) : {}) as Fields
@@ -1474,13 +1536,18 @@ export const register: Register = on => {
     const setView = (patch: Partial<View>) => () => update($, viewAtom, v => ({ ...v, ...patch }))
 
     // ---- what needs the person: this session's own asks, then other sessions', then what may be stuck ----
-    type NeedRow = { key: string; glyph: string; color: string; text: string; from: number | null; onPress: (() => Promise<unknown>) | null }
+    // `asks` are drawn as cards: a pick answers Claude ('answer'), goes in the prompt ('prompt'), or jumps there ('jump').
+    type NeedRow = {
+      key: string; glyph: string; color: string; text: string; from: number | null; onPress: (() => Promise<unknown>) | null
+      asks?: Ask[]; mode?: 'answer' | 'prompt' | 'jump'; callId?: string; sessionId?: string
+    }
     const needRows: NeedRow[] = []
     for (const r of groups.needs) {
       const agentId = r.agentId
       needRows.push({
         key: r.key, glyph: r.glyph, color: 'yellow', text: r.text, from: r.from,
         onPress: agentId === undefined ? null : () => togglePeek($, agentId),
+        ...(r.asks === undefined ? {} : r.callId !== undefined ? { asks: r.asks, mode: 'answer' as const, callId: r.callId } : { asks: r.asks, mode: 'prompt' as const }),
       })
     }
     const mapNeeds: MapNeed[] = needsOf(map)
@@ -1498,7 +1565,95 @@ export const register: Register = on => {
         text: `${n.where}: ${n.why}`,
         from: n.since,
         onPress: node !== undefined ? () => openNode(s, node) : !s.isSelf ? async () => startJump($, s.sessionId) : () => openSession(s),
+        ...(n.asks === undefined || s.isSelf ? {} : { asks: n.asks, mode: 'jump' as const, sessionId: s.sessionId }),
       })
+    }
+
+    // ---- Claude's choices as cards ----
+    const clearPicks = (callId: string) => update($, viewAtom, v => ({ ...v, picks: Object.fromEntries(Object.entries(v.picks ?? {}).filter(([k]) => !k.startsWith(`${callId}:`))) }))
+    // The person's answer to a question of this session's Claude, handed to the call that waits on it.
+    const sendAnswers = async (callId: string, asks: readonly Ask[], byIndex: Record<number, readonly string[]>): Promise<void> => {
+      const answers = answersOf(asks, byIndex)
+      if (answers === null) return
+      const answer = askWaiters.get(callId)
+      await clearPicks(callId)
+      if (answer === undefined) return notify($, 'That question was already answered.', { timeoutMs: 4_000 })
+      answer(answers)
+    }
+    const pressChoice = (r: NeedRow, qi: number, c: Choice, chosen: readonly string[]) => async (): Promise<void> => {
+      const ask = r.asks?.[qi]
+      if (ask === undefined) return
+      if (r.mode === 'prompt') {
+        await $.prompt.fill({ text: c.label, mode: 'insert' }).catch(() => undefined)
+        return
+      }
+      if (r.mode === 'jump' && r.sessionId !== undefined) return startJump($, r.sessionId)
+      if (r.mode !== 'answer' || r.callId === undefined) return
+      const callId = r.callId
+      const next = pickChoice(chosen, c.label, ask.isMulti)
+      // One question, one choice: the press is the answer.
+      if ((r.asks?.length ?? 0) === 1 && !ask.isMulti) return sendAnswers(callId, r.asks ?? [], { 0: next })
+      await update($, viewAtom, v => ({ ...v, picks: { ...(v.picks ?? {}), [`${callId}:${qi}`]: next } }))
+    }
+    // Each question's choices as cards, two to a row where there is room: the label, then what it leads to.
+    const choiceCards = (r: NeedRow) => {
+      const asks = r.asks ?? []
+      if (asks.length === 0 || r.mode === undefined) return null
+      const inner = width - 2
+      const cols = inner >= 60 ? 2 : 1
+      const cardW = Math.floor((inner - (cols - 1)) / cols)
+      const room = cardW - 4
+      const picksOf = (qi: number): string[] => (r.callId === undefined ? [] : view.picks?.[`${r.callId}:${qi}`] ?? [])
+      const byIndex: Record<number, readonly string[]> = Object.fromEntries(asks.map((_, qi) => [qi, picksOf(qi)]))
+      const needsSend = r.mode === 'answer' && (asks.length > 1 || asks.some(a => a.isMulti))
+      const isReady = answersOf(asks, byIndex) !== null
+      const hint = r.mode === 'answer'
+        ? (needsSend ? 'Pick for each question, then send.' : 'Press one to answer, or answer in the dialog.')
+        : r.mode === 'prompt' ? 'Press one to put it in your prompt.' : 'Jump there to answer.'
+      const callId = r.callId
+      return (
+        <Box key={`asks:${r.key}`} flexDirection="column" marginLeft={2}>
+          {asks.map((a, qi) => {
+            const rows: Choice[][] = []
+            for (let i = 0; i < a.choices.length; i += cols) rows.push(a.choices.slice(i, i + cols))
+            const chosen = picksOf(qi)
+            const head = asks.length > 1 ? a.question : ''
+            return (
+              <Box key={`ask:${r.key}:${qi}`} flexDirection="column">
+                {(head !== '' || a.header !== '' || a.isMulti) && (
+                  <Box>
+                    {a.header !== '' && <Text color="yellow">{`${fit(m(a.header), 14)} `}</Text>}
+                    {head !== '' && <Text>{fit(m(head), Math.max(8, inner - (a.header === '' ? 0 : Math.min(cellWidth(a.header), 14) + 1) - (a.isMulti ? 12 : 0)))}</Text>}
+                    {a.isMulti && <Text dimColor>{' (pick any)'}</Text>}
+                  </Box>
+                )}
+                {a.choices.length === 0 && <Text dimColor>{fit('Answer this one in the dialog.', inner)}</Text>}
+                {rows.map((row, ri) => (
+                  <Box key={`askrow:${r.key}:${qi}:${ri}`} gap={1}>
+                    {row.map((c, ci) => {
+                      const n = ri * cols + ci + 1
+                      const isOn = chosen.includes(c.label)
+                      const lines = c.detail === '' ? [] : wrap(m(c.detail), room, 2)
+                      return (
+                        <Box key={`choice:${r.key}:${qi}:${n}`} width={cardW} flexDirection="column" borderStyle="round" borderColor={isOn ? 'claude' : 'gray'} borderDimColor={!isOn} hover={{ borderColor: 'claude', borderDimColor: false }} paddingX={1}>
+                          <Button key={`pick:${r.key}:${qi}:${n}`} plain label={fit(`${isOn ? '✓' : `${n}.`} ${m(c.label)}`, room)} onPress={pressChoice(r, qi, c, chosen)} />
+                          {lines.map((l, i) => <Text key={`choiced:${r.key}:${qi}:${n}:${i}`} dimColor>{l}</Text>)}
+                        </Box>
+                      )
+                    })}
+                  </Box>
+                ))}
+              </Box>
+            )
+          })}
+          <Box gap={1}>
+            {needsSend && callId !== undefined && (
+              <Button key={`send:${r.key}`} variant={isReady ? 'primary' : undefined} dimColor={!isReady} label="Send answers" onPress={() => (isReady ? sendAnswers(callId, asks, byIndex) : Promise.resolve())} />
+            )}
+            <Text dimColor>{fit(hint, needsSend ? Math.max(8, inner - 16) : inner)}</Text>
+          </Box>
+        </Box>
+      )
     }
     const needRow = (r: NeedRow) => {
       const time = r.from === null ? '' : dur(now - r.from)
@@ -1514,6 +1669,7 @@ export const register: Register = on => {
               : <Button key={r.key} plain label={label} onPress={r.onPress} />}
           </Box>
           {second !== undefined && <Text dimColor>{`  ${second}`}</Text>}
+          {choiceCards(r)}
         </Box>
       )
     }
@@ -2132,7 +2288,8 @@ export const register: Register = on => {
     // The band draws often; the map behind it is worked out at most once a second.
     if (now - bandCache.at > 1000) {
       const hasSessionsMod = adaptSessionRows(await readOther($, 'sessionsRows')).length > 0
-      const items = needsOf(await currentMap($, now)).filter(n => n.kind === 'stuck' || (!hasSessionsMod && n.kind === 'wait' && !n.isSelf))
+      // Another session's question at the end of its answer is the pane's to list, not the band's: only what blocks it shows here.
+      const items = needsOf(await currentMap($, now)).filter(n => n.kind === 'stuck' || (!hasSessionsMod && n.kind === 'wait' && !n.isSelf && n.isReply !== true))
       bandCache = { at: now, items }
     }
     const items = bandCache.items

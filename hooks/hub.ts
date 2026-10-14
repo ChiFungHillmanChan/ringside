@@ -1,4 +1,5 @@
-import type { HubMember, HubMessage, HubState, MapNode } from '../types'
+import type { Ask, HubMember, HubMessage, HubState, MapNode, NeedKind } from '../types'
+import { asAsks } from './asks'
 import { asMapNode, plainSummary, stateWord } from './map'
 
 // A session that has not written for this long has gone (closed, crashed, slept).
@@ -30,6 +31,9 @@ export type HubFile = {
   // For Ringside: why it may be stuck ('' when fine) and what it started. Absent in older files.
   stuck?: string
   nodes?: MapNode[]
+  // What it waits on the person for, and that question's choices. Absent in older files.
+  needKind?: NeedKind
+  asks?: Ask[]
 }
 
 // Most a file carries for the map, so one busy session cannot crowd every other pane.
@@ -83,6 +87,8 @@ export function asHubFile(raw: unknown): HubFile | null {
     messages: Array.isArray(o.messages) ? o.messages.flatMap(m => asMessage(m) ?? []) : [],
     stuck: str(o.stuck),
     nodes: Array.isArray(o.nodes) ? o.nodes.slice(0, NODES_MAX).flatMap(n => asMapNode(n) ?? []) : [],
+    ...(o.needKind === 'ask' || o.needKind === 'reply' ? { needKind: o.needKind } : {}),
+    ...(Array.isArray(o.asks) ? { asks: asAsks(o.asks) } : {}),
   }
 }
 

@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <img src="media/ringside-demo.gif" alt="Ringside in a terminal, in eleven captioned steps. Claude Code runs on the left and the Ringside pane sits on the right. The pane lists three sessions: shop-api, blog, which waits on a question, and docs-site, which runs a background shell. A prompt asks Claude for four tasks and three parallel Explore agents. The agents hang under shop-api with what each is reading. The Tasks tab shows the checklist with three tasks marked now. In the Launch tab, the code-reviewer card's run button opens a task box, a task is typed, and the card shows running. Back on the map, code-reviewer runs under shop-api. The Tasks tab then shows all four tasks ticked. Pressing the blog session opens its card with a Jump there button. Pressing an Explore agent shows its role, task, steps and answer." width="100%">
+  <img src="https://raw.githubusercontent.com/ChiFungHillmanChan/ringside/media/ringside-demo.gif" alt="Ringside in a terminal, in eleven captioned steps. Claude Code runs on the left and the Ringside pane sits on the right. The pane lists three sessions: shop-api, blog, which waits on a question, and docs-site, which runs a background shell. A prompt asks Claude for four tasks and three parallel Explore agents. The agents hang under shop-api with what each is reading. The Tasks tab shows the checklist with three tasks marked now. In the Launch tab, the code-reviewer card's run button opens a task box, a task is typed, and the card shows running. Back on the map, code-reviewer runs under shop-api. The Tasks tab then shows all four tasks ticked. Pressing the blog session opens its card with a Jump there button. Pressing an Explore agent shows its role, task, steps and answer." width="100%">
 </p>
 
 <p align="center">
@@ -49,6 +49,7 @@ It also gives you Claude's task list as a checklist and a launcher for every age
 - [How to use it](#how-to-use-it)
   - [The pane at a glance](#the-pane-at-a-glance)
   - [Map](#map)
+  - [Choices as cards](#choices-as-cards)
   - [Peek: look inside anything](#peek-look-inside-anything)
   - [Jump there](#jump-there)
   - [Tasks](#tasks)
@@ -73,6 +74,7 @@ It also gives you Claude's task list as a checklist and a launcher for every age
 | **Every session, one map** | All Claude Code sessions on this computer, with the ones that need you first. Idle ones fold to one line each. Read from Claude Code's own session registry, so nothing else needs to be installed. |
 | **What each session started** | Subagents, background shells, `/loop` schedules and workflow agents hang under their session with `├─▸` and `└─▸`, each with its task, current step and clock. |
 | **NEEDS YOU** | Questions, plan approvals, permission prompts, and a subagent waiting on you, from every session, at the top of the pane. |
+| **Choices as cards** | When Claude asks you to choose, each choice is a card under NEEDS YOU, with what it leads to. Press one to answer this session's question, or to put it in your prompt. Another session's choices show too, with a jump there. |
 | **May be stuck** | The same call failing 3 times in a row, 10 minutes without a new step, or one foreground step running for more than 20 minutes. |
 | **Peek** | Press any card to open it right where it is: an agent's role, task, steps and answer, or a session's last words, folder and terminal. |
 | **Jump there** | Brings a session's terminal to the front (Terminal or iTerm2 on macOS, or tmux). For a background session it opens one with `claude attach`. |
@@ -216,7 +218,7 @@ Every card and every line on the map is a button. Press it with the mouse, or mo
 
 ### Map
 
-<p align="center"><img src="media/map.png" alt="The Map tab: shop-api with three Explore agents under it, each showing what it is doing; blog waiting on a question in yellow; docs-site running a background shell" width="640"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/ChiFungHillmanChan/ringside/media/map.png" alt="The Map tab: shop-api with three Explore agents under it, each showing what it is doing; blog waiting on a question in yellow; docs-site running a background shell" width="640"></p>
 
 The map lists every Claude Code session on this computer:
 
@@ -245,6 +247,28 @@ Under each session hangs what it started: subagents (`Explore · Find tax calcul
 
 Background shells, waits on you and subagent calls never count as stuck.
 
+### Choices as cards
+
+When Claude asks you to choose, Ringside draws each choice as a card under NEEDS YOU, with what it leads to underneath.
+
+```
+NEEDS YOU
+? Which database?                                                  0:12
+  ╭──────────────────────────────────╮ ╭──────────────────────────────────╮
+  │ 1. Postgres                      │ │ 2. SQLite                        │
+  │ Relational, runs anywhere        │ │ One file, no server              │
+  ╰──────────────────────────────────╯ ╰──────────────────────────────────╯
+  Press one to answer, or answer in the dialog.
+```
+
+| Where the choices come from | A press on a card |
+| --- | --- |
+| A question Claude asks in this session, in its dialog with options | answers it: the dialog closes and Claude gets your pick, as if you had chosen it there. With several questions, or one where you may pick any number, press your picks, then **Send answers**. You can still answer in the dialog instead. |
+| The question Claude's answer ends on: a numbered or bulleted list right after it, `…, or …?` in the question itself, or a plain "Want me to …?" (Yes and No) | puts that choice into your prompt at the cursor, keeping what you had typed. Nothing is sent until you press Enter. |
+| Another session's question | jumps to that session. No session answers another one's question. |
+
+Another session's question at the end of its answer stays in the pane. Above the prompt, only a question that holds a session up is shown.
+
 ### Peek: look inside anything
 
 Press a card and it opens right under itself. Press `[close]` or `x` to fold it again.
@@ -256,9 +280,9 @@ Press a card and it opens right under itself. Press `[close]` or `x` to fold it 
 | this session | the repo board, and **[replay the last turn's edits]** when Replay Theater is loaded |
 | a loop or a background shell | its details, and a **Stop** that needs two presses |
 
-<p align="center"><img src="media/session.png" alt="A session's Peek: blog waiting on you, its question, its folder and terminal, and a Jump there button" width="640"><br><em>A session: what it is waiting on, where it runs, Jump there</em></p>
+<p align="center"><img src="https://raw.githubusercontent.com/ChiFungHillmanChan/ringside/media/session.png" alt="A session's Peek: blog waiting on you, its question, its folder and terminal, and a Jump there button" width="640"><br><em>A session: what it is waiting on, where it runs, Jump there</em></p>
 
-<p align="center"><img src="media/peek.png" alt="An agent's Peek: Explore, its role and task, finished, started by Claude on sonnet with 6 calls, the steps it took and its answer, with a use in prompt button" width="640"><br><em>An agent: role, task, steps and answer</em></p>
+<p align="center"><img src="https://raw.githubusercontent.com/ChiFungHillmanChan/ringside/media/peek.png" alt="An agent's Peek: Explore, its role and task, finished, started by Claude on sonnet with 6 calls, the steps it took and its answer, with a use in prompt button" width="640"><br><em>An agent: role, task, steps and answer</em></p>
 
 ### Jump there
 
@@ -266,7 +290,7 @@ Press a card and it opens right under itself. Press `[close]` or `x` to fold it 
 
 - **Terminal or iTerm2 on macOS:** Ringside finds the window and tab by the session's terminal device (`ttys011`). A Terminal window minimised to the Dock comes back.
 - **tmux, on any system:** it selects the pane that runs the session in its tmux window. On macOS it also brings that terminal window forward; elsewhere the card says `Showed blog's pane in its tmux window`, and you switch to that terminal yourself.
-- **A background session (macOS):** the button says **Open in Terminal** and opens a new Terminal window running `claude attach <id>`.
+- **A background session (macOS):** the button says **Open in Terminal** and opens a new window running `claude attach <id>`, in iTerm2 when that is your terminal, else in Terminal.
 
 The card then says what happened, for example `Switched to blog's terminal (ttys011)`. If it could not, it says why, for example `its terminal window was not found (Terminal, iTerm2 and tmux were checked)`.
 
@@ -274,9 +298,9 @@ The first time you jump, macOS may ask whether your terminal may control Termina
 
 ### Tasks
 
-<p align="center"><img src="media/tasks-now.png" alt="The Tasks tab while work runs: 0 of 4 done, three tasks marked now, one to do" width="640"><br><em>While Claude works</em></p>
+<p align="center"><img src="https://raw.githubusercontent.com/ChiFungHillmanChan/ringside/media/tasks-now.png" alt="The Tasks tab while work runs: 0 of 4 done, three tasks marked now, one to do" width="640"><br><em>While Claude works</em></p>
 
-<p align="center"><img src="media/tasks.png" alt="The Tasks tab when the work is done: 4 of 4 done, every task ticked, the bar at 100%" width="640"><br><em>When the work is done</em></p>
+<p align="center"><img src="https://raw.githubusercontent.com/ChiFungHillmanChan/ringside/media/tasks.png" alt="The Tasks tab when the work is done: 4 of 4 done, every task ticked, the bar at 100%" width="640"><br><em>When the work is done</em></p>
 
 The Tasks tab is this session's task list, the one Claude keeps with its task tools, in Claude's own order:
 
@@ -288,9 +312,9 @@ The header counts them (`2 of 4 done · 0:26`), with a bar and the time since th
 
 ### Launch
 
-<p align="center"><img src="media/launch.png" alt="The Launch tab with code-reviewer picked: its description in full, a task box reading review src/pricing.ts for rounding bugs, and a cancel button where run was" width="640"><br><em>Press ▶ run and type the task</em></p>
+<p align="center"><img src="https://raw.githubusercontent.com/ChiFungHillmanChan/ringside/media/launch.png" alt="The Launch tab with code-reviewer picked: its description in full, a task box reading review src/pricing.ts for rounding bugs, and a cancel button where run was" width="640"><br><em>Press ▶ run and type the task</em></p>
 
-<p align="center"><img src="media/launch-running.png" alt="The Launch tab after Enter: Started code-reviewer, and the code-reviewer card showing running 0:02" width="640"><br><em>Enter starts it in the background</em></p>
+<p align="center"><img src="https://raw.githubusercontent.com/ChiFungHillmanChan/ringside/media/launch-running.png" alt="The Launch tab after Enter: Started code-reviewer, and the code-reviewer card showing running 0:02" width="640"><br><em>Enter starts it in the background</em></p>
 
 The Launch tab lists every agent type you can start, as cards in sections:
 
@@ -343,7 +367,7 @@ While the pane is not on screen, Ringside stays out of your way. It draws one ro
 
 In the Claude Code desktop app, the map is also drawn as one picture above the same list:
 
-<p align="center"><img src="media/desktop-graph.png" alt="The desktop picture: session boxes on the left, the agents and shells they started on the right, joined by lines; a waiting session in yellow, a possibly stuck one in orange" width="520"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/ChiFungHillmanChan/ringside/media/desktop-graph.png" alt="The desktop picture: session boxes on the left, the agents and shells they started on the right, joined by lines; a waiting session in yellow, a possibly stuck one in orange" width="520"></p>
 
 ## Commands
 
@@ -391,13 +415,15 @@ Ringside works only on your computer. **It makes no network requests and calls n
 
 | It | How |
 | --- | --- |
-| watches this session's tool calls, subagents and turns | through the `tool.call`, `agent.spawn`, `agent.offer`, `prompt.submit`, `turn.start`, `turn.complete` and `classic.Stop` hooks. It never denies, delays or rewrites a call, and never holds, drops or changes your prompt. |
+| watches this session's tool calls, subagents and turns | through the `tool.call`, `agent.spawn`, `agent.offer`, `prompt.submit`, `turn.start`, `turn.complete` and `classic.Stop` hooks. It never denies, delays or rewrites a call, and never holds, drops or changes your prompt. The one call it answers is Claude's question, and only with the choice card you pressed. |
 | lists the other sessions on this computer | reads Claude Code's own session registry (`~/.claude/sessions/*.json`), and runs `ps` to leave out sessions that have ended |
 | shares what this session started | writes one small file per session to `~/.claude/mods-data/ringside/hub/<repo>/<session>.json`, and reads the other sessions' files |
+| keeps its folder private and tidy | runs `chmod 700` on `~/.claude/mods-data/ringside`, and deletes board files there that have not been written for a week |
 | knows the repository and branch | runs `git rev-parse` in the session's folder |
 | shows a subagent's steps | reads that subagent's transcript, for this session's own subagents only |
 | fills the launcher | reads agent files in `~/.claude/agents` and `<repo>/.claude/agents`, and the session's command list |
 | Jump there | runs `osascript` (macOS) or `tmux` when you press it, and only then |
+| a choice card | answers this session's question, or puts the choice in your prompt, only when you press it, with that card's words |
 | the repo board | adds unread notes from other sessions in the same repository to your next prompt, framed as what those sessions said, not as your instructions, and gives Claude the `hub` tool |
 
 `CLAUDE_CONFIG_DIR` is respected. Run `claude plugin validate .` in a clone to see every hook and call Ringside makes. To report a security problem, see [SECURITY.md](SECURITY.md).
@@ -474,6 +500,7 @@ No model calls and no network. It redraws once a second while something is runni
 - A session shares what it started only once it runs Ringside itself.
 - Jump needs Terminal or iTerm2 on macOS, or tmux.
 - Where an organization manages Claude Code, a plugin you install gets no `Stop` hook. There a loop or background shell leaves the map on its notification alone.
+- Choices at the end of Claude's answer are read from how it is laid out. An answer laid out some other way shows its question without cards.
 - Mods are an early-access Claude Code feature, and their API can change between releases.
 
 ## How it works
@@ -487,10 +514,11 @@ hooks/
   hub.ts         the per-session board files and the repo board
   agents.ts      the launcher catalogue: agent files, sections, colours
   loops.ts       /loop schedules and self-paced loops
+  asks.ts        the choices Claude offers, read from its questions and the end of its answers
   mask.ts        masks personal details on screen while CLAUDE_MODS_RECORDING=1 is set
 types/
   index.d.ts     the shape of everything Ringside keeps in Claude Code's state
-tests/           72 tests; several mount the pane on both the terminal and desktop surfaces
+tests/           87 tests; several mount the pane on both the terminal and desktop surfaces
 ```
 
 Each session that runs Ringside publishes a small file about itself (its state, what it is doing, what it started). Every session reads the others' files and Claude Code's own session registry, and draws the map from both.

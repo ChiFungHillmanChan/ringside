@@ -4,8 +4,16 @@ All notable changes to Ringside are listed here. Versions follow [semantic versi
 
 ## Unreleased
 
-## 0.9.1 (2026-10-14)
+## 0.10.0 (2026-10-14)
 
+- **Choices as cards.** When Claude asks you to choose, each choice is a card under NEEDS YOU, with what it leads to. Press one to answer this session's question in place of its dialog (several questions, or pick-any ones: press your picks, then **Send answers**), or to put the choice Claude's answer ended on into your prompt. Another session's choices show too, and a press jumps there.
+- The band above the prompt no longer shows another session's closing question, only what holds a session up. The pane still lists it.
+- Ringside's folder is kept private (`chmod 700`), and board files not written for a week are deleted.
+- Stuck reasons read in plain words ("the same command failed 3 times").
+- An open Peek on a finished subagent reads its transcript once, not every few seconds.
+- **Open in Terminal** opens the new window in iTerm2 when that is your terminal.
+- The README's GIF and screenshots moved to the `media` branch, so installing Ringside no longer copies 7 MB of images.
+- CI tests against a pinned Claude Code (2.1.299) on Ubuntu and macOS.
 - **[to prompt]** in the launcher no longer wipes what you had typed. Its words go in at the cursor.
 - The pane opens by itself only beside a fullscreen transcript. On the main screen (tmux's default) it no longer opens above the prompt unasked; `/ringside` opens it.
 - Recording mode now masks everything the pane draws. The desktop drawing, a loop's details, the Jump button and its error toast, the board's member names and its notes, and the launcher's names were shown unmasked.

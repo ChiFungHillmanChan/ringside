@@ -636,13 +636,13 @@ test('the same call failing three times may be stuck: under NEEDS YOU, and in th
   await clock.settle()
 
   const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(String((await pane.find({ key: 'need:session:test-session' }))?.props.label)).toMatch(/^this session: the same Bash failed 3 +0:00$/)
+  expect(String((await pane.find({ key: 'need:session:test-session' }))?.props.label)).toMatch(/^this session: the same command failed 3 +0:00$/)
   // What does not fit goes on a second line, never cut.
   expect(await pane.find({ type: 'Text', text: '  times in a row: pnpm install' })).toBeDefined()
   await pane.unmount()
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect(await band.find({ type: 'Text', text: 'May be stuck' })).toBeDefined()
-  expect(await band.find({ type: 'Text', text: /^this session: the same Bash failed 3 times/ })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /^this session: the same command failed 3 times/ })).toBeDefined()
   expect(await band.find({ key: 'map-open' })).toBeDefined()
   await band.unmount()
 })
@@ -1289,4 +1289,160 @@ test('[to prompt] puts its words in at the cursor and keeps what the person had 
   await ui.press({ key: 'launch-fill' })
   expect(fills).toEqual([{ text: 'Use the Explore agent to ', mode: 'insert' }])
   await ui.unmount()
+})
+
+// The Buttons a pane draws whose key starts with `prefix`, by key.
+async function buttonsFrom(ui: { findAll: (q: { type: string }) => Promise<{ key: unknown; props: Record<string, unknown> }[]> }, prefix: string): Promise<{ key: string; label: string }[]> {
+  return (await ui.findAll({ type: 'Button' })).filter(b => String(b.key).startsWith(prefix)).map(b => ({ key: String(b.key), label: String(b.props.label ?? '') }))
+}
+
+const DB_QUESTION = {
+  question: 'Which database?', header: 'DB', multiSelect: false,
+  options: [{ label: 'Postgres', description: 'Relational, runs anywhere' }, { label: 'SQLite', description: 'One file, no server' }],
+}
+
+test("Claude's question shows its choices as cards; a press answers it in place of the dialog", async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  mock.env(on, { HOME: '/Users/test' })
+  host(on)
+  // The dialog waits on the person until the pane answers.
+  on('tool.call', { tool: 'AskUserQuestion' }, () => new Promise(() => undefined))
+  await $.session.start({ cwd: '/Users/test/proj', surface: null, isInteractive: false })
+  const asking = $.tool.call({ tool: 'AskUserQuestion', questions: [DB_QUESTION] })
+  await clock.settle()
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const cards = await buttonsFrom(ui, 'pick:need:')
+  expect(cards.map(c => c.label)).toEqual(['1. Postgres', '2. SQLite'])
+  expect(await ui.find({ type: 'Text', text: 'One file, no server' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Press one to answer, or answer in the dialog/ })).toBeDefined()
+  await ui.press({ key: cards[1]?.key ?? '' })
+  const ran = await asking
+  expect((ran as { result?: unknown }).result).toEqual({ questions: [DB_QUESTION], answers: { 'Which database?': 'SQLite' } })
+  await clock.settle()
+  expect(await buttonsFrom(ui, 'pick:need:')).toEqual([])
+  expect(await ui.find({ type: 'Text', text: 'NEEDS YOU' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('several questions, or a pick-any one, are answered card by card, then sent together', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  mock.env(on, { HOME: '/Users/test' })
+  host(on)
+  on('tool.call', { tool: 'AskUserQuestion' }, () => new Promise(() => undefined))
+  await $.session.start({ cwd: '/Users/test/proj', surface: null, isInteractive: false })
+  const checks = { question: 'Which checks run?', header: 'Checks', multiSelect: true, options: [{ label: 'Lint', description: '' }, { label: 'Types', description: '' }, { label: 'Tests', description: '' }] }
+  const asking = $.tool.call({ tool: 'AskUserQuestion', questions: [DB_QUESTION, checks] })
+  await clock.settle()
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /Which checks run\?/ })).toBeDefined()
+  const send = (await buttonsFrom(ui, 'send:need:'))[0]
+  expect(send?.label).toBe('Send answers')
+  const byLabel = async (label: string): Promise<string> => (await buttonsFrom(ui, 'pick:need:')).find(c => c.label.endsWith(label))?.key ?? ''
+  await ui.press({ key: await byLabel('Postgres') })
+  await ui.press({ key: await byLabel('Lint') })
+  await ui.press({ key: await byLabel('Tests') })
+  await ui.press({ key: await byLabel('Lint') })
+  expect((await buttonsFrom(ui, 'pick:need:')).map(c => c.label)).toEqual(['✓ Postgres', '2. SQLite', '1. Lint', '2. Types', '✓ Tests'])
+  await ui.press({ key: send?.key ?? '' })
+  const ran = await asking
+  expect((ran as { result?: { answers?: unknown } }).result?.answers).toEqual({ 'Which database?': 'Postgres', 'Which checks run?': 'Tests' })
+  await ui.unmount()
+})
+
+test("the choices Claude's answer ends on are cards; a press puts one in the prompt, keeping the draft", async ($, on) => {
+  const clock = mock.clock(on, { now: 50_000 })
+  mock.env(on, { HOME: '/Users/test' })
+  host(on)
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
+  on('turn.complete', ($, e) => ({ text: e.answer }))
+  const fills: { text: string; mode: string }[] = []
+  on('prompt.fill', ($, e) => {
+    fills.push({ text: e.text, mode: e.mode })
+    return { isFilled: true }
+  })
+  await $.session.start({ cwd: '/Users/test/proj', surface: null, isInteractive: false })
+  await $.turn.start({ text: 'what next', turnId: 't1' })
+  await $.turn.complete({
+    answer: 'The fixes are in.\n\nWhich should I do first?\n\n1. **Fix the band**: keep it quiet\n2. **Merge now** — ship 0.9.1',
+    durationMs: 10, isAborted: false, turnId: 't1', reason: 'answer', usage: undefined,
+  })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /Reply: Which should I do first\?/ })).toBeDefined()
+  const cards = await buttonsFrom(ui, 'pick:need:reply:')
+  expect(cards.map(c => c.label)).toEqual(['1. Fix the band', '2. Merge now'])
+  expect(await ui.find({ type: 'Text', text: 'keep it quiet' })).toBeDefined()
+  await ui.press({ key: cards[1]?.key ?? '' })
+  expect(fills).toEqual([{ text: 'Merge now', mode: 'insert' }])
+  await ui.unmount()
+})
+
+test("another session's choices show as cards that jump there; its closing question stays out of the band", async ($, on) => {
+  const start = 5_000_000
+  const clock = mock.clock(on, { now: start })
+  mock.env(on, { HOME })
+  host(on, { fs: false })
+  on('ui.toast', () => ({ value: undefined }))
+  on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
+    const { Box } = $.ui.resolve(e)
+    return <Box />
+  })
+  const files = new Map<string, string>()
+  const asks = [{ question: 'Which database?', header: 'DB', choices: [{ label: 'Postgres', detail: 'Relational' }, { label: 'SQLite', detail: 'One file' }], isMulti: false }]
+  files.set(`${DIR}/asker.json`, boardFile({ sessionId: 'asker', name: 'api-fix', state: 'needs', doing: 'Which database?', heartbeatAt: start, needKind: 'ask', asks }))
+  files.set(`${DIR}/replier.json`, boardFile({
+    sessionId: 'replier', name: 'docs', state: 'needs', doing: 'Reply: Want me to push?', heartbeatAt: start, needKind: 'reply',
+    asks: [{ question: 'Want me to push?', header: '', choices: [{ label: 'Yes', detail: 'Push' }, { label: 'No', detail: '' }], isMulti: false }],
+  }))
+  memFs(on, files, () => start)
+  await $.session.start({ cwd: '/Users/test/proj', surface: null, isInteractive: false })
+  await clock.advance(5_000)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await buttonsFrom(ui, 'pick:need:session:asker')).map(c => c.label)).toEqual(['1. Postgres', '2. SQLite'])
+  expect((await buttonsFrom(ui, 'pick:need:session:replier')).map(c => c.label)).toEqual(['1. Yes', '2. No'])
+  expect(await ui.find({ type: 'Text', text: /Jump there to answer/ })).toBeDefined()
+  await ui.unmount()
+
+  let band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: /api-fix: Which database\?/ })).toBeDefined()
+  await band.unmount()
+  // With only the closing question left, the band says nothing.
+  files.delete(`${DIR}/asker.json`)
+  await clock.advance(5_000)
+  band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: 'Waiting on you' })).toBeUndefined()
+  await band.unmount()
+})
+
+test('what a session waits on goes out with its choices, so the other maps can draw them', () => {
+  const replyAsk = { question: 'Ship it?', header: '', choices: [{ label: 'Yes', detail: '' }, { label: 'No', detail: '' }], isMulti: false }
+  expect(presenceOf({ ...IDLE, reply: 'Ship it?', replyAsk }, [], { startedAt: null, tasks: [] }, [])).toEqual({ state: 'needs', doing: 'Reply: Ship it?', needKind: 'reply', asks: [replyAsk] })
+  const asking = job({ id: 'q1', tool: 'AskUserQuestion', need: { kind: 'question', text: 'Which database?', asks: [{ question: 'Which database?', header: 'DB', choices: [{ label: 'Postgres', detail: '' }], isMulti: false }] } })
+  expect(presenceOf(IDLE, [asking], { startedAt: null, tasks: [] }, []).needKind).toBe('ask')
+})
+
+test("Ringside's folder is made private and keeps a week of board files, touching nothing outside it", async ($, on) => {
+  const start = 5_000_000
+  const clock = mock.clock(on, { now: start })
+  mock.env(on, { HOME })
+  host(on, { fs: false, process: false })
+  const files = new Map<string, string>([[`${DIR}/peer.json`, boardFile({ sessionId: 'peer', heartbeatAt: start })]])
+  memFs(on, files, () => start)
+  const ran: string[][] = []
+  on('process.run', ($, e) => {
+    ran.push([...e.argv])
+    return { value: { exitCode: e.argv[0] === 'git' ? 128 : 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  await $.session.start({ cwd: '/Users/test/proj', surface: null, isInteractive: false })
+  await clock.settle()
+  const dir = `${HOME}/.claude/mods-data/ringside`
+  expect(ran).toContainEqual(['chmod', '700', dir])
+  expect(ran).toContainEqual(['find', `${dir}/hub`, '-type', 'f', '-name', '*.json', '-mtime', '+7', '-delete'])
+  expect(ran).toContainEqual(['find', `${dir}/hub`, '-mindepth', '1', '-type', 'd', '-empty', '-delete'])
+  const paths = ran.filter(a => a[0] === 'find' || a[0] === 'chmod').flatMap(a => a.filter(x => x.startsWith('/')))
+  expect(paths.length).toBe(3)
+  expect(paths.every(p => p.startsWith(dir))).toBe(true)
 })

@@ -1,8 +1,16 @@
 // What a running call is blocked on: the person answering a question or
 // approving a plan.
+// One choice Claude offered: its words, and what choosing it leads to ('' when it says nothing more).
+export type Choice = { label: string; detail: string }
+
+// A question Claude asked with choices: one of AskUserQuestion's, or the question its answer ended on.
+export type Ask = { question: string; header: string; choices: Choice[]; isMulti: boolean }
+
 export type Need = {
   kind: 'question' | 'plan'
   text: string
+  // AskUserQuestion's questions with their choices (absent for a plan, and in older state).
+  asks?: Ask[]
 }
 
 export type Job = {
@@ -110,6 +118,8 @@ export type MainState = {
   since: number | null
   // The question Claude ended its last answer with, until the person replies.
   reply: string | null
+  // That question with the choices it offered (absent in older state).
+  replyAsk?: Ask | null
   // What the engine says the session waits on (a permission prompt, a dialog).
   waiting: string | null
   waitingAt: number | null
@@ -223,7 +233,14 @@ export type FleetFile = {
   stuck: string
   heartbeatAt: number
   nodes: MapNode[]
+  // What it waits on the person for: 'ask' blocks it (a question, a plan), 'reply' is
+  // the question its answer ended on; absent when nothing, or in an older file.
+  needKind?: NeedKind
+  // That question's choices, for cards on the other maps.
+  asks?: Ask[]
 }
+
+export type NeedKind = 'ask' | 'reply'
 
 // The pane's own view: which tab, how dense, and what is opened below the map.
 export type View = {
@@ -237,6 +254,8 @@ export type View = {
   replayAt?: number | null
   // What the last Jump did, shown in that session's card (absent in older state).
   jump?: JumpNote | null
+  // Cards picked for a question of Claude's not sent yet: '<call id>:<question index>' to labels.
+  picks?: Record<string, string[]>
 }
 
 export type JumpNote = { sessionId: string; at: number; isOk: boolean; text: string }

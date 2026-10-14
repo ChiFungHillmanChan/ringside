@@ -42,7 +42,7 @@ test('says what a call does in plain words', () => {
 test('may be stuck: the same call failing three times, a quiet spell, one step running too long', () => {
   const now = 100 * 60_000
   const fail = (i: number) => job({ id: `f${i}`, detail: 'pnpm install', isError: true, startedAt: now - 1000 * (10 - i), endedAt: now - 1000 * (9 - i) })
-  expect(stuckReason([fail(1), fail(2), fail(3)], true, now)).toBe('the same Bash failed 3 times in a row: pnpm install')
+  expect(stuckReason([fail(1), fail(2), fail(3)], true, now)).toBe('the same command failed 3 times in a row: pnpm install')
   expect(stuckReason([fail(1), fail(2)], true, now)).toBe('')
   expect(stuckReason([fail(1), fail(2), fail(3)], false, now)).toBe('')
   // A different call in between resets the count.
@@ -50,7 +50,7 @@ test('may be stuck: the same call failing three times, a quiet spell, one step r
   const quiet = job({ startedAt: now - STUCK_QUIET_MS - 5000, endedAt: now - STUCK_QUIET_MS - 1000 })
   expect(stuckReason([quiet], true, now)).toBe('no new step for 10m')
   const long = job({ detail: 'npm run e2e', startedAt: now - STUCK_STEP_MS - 60_000, endedAt: null })
-  expect(stuckReason([long], true, now)).toBe('one step has run for 21m: Bash npm run e2e')
+  expect(stuckReason([long], true, now)).toBe('one step has run for 21m: running npm run e2e')
   // Background shells, waits on the person and subagents run long on purpose.
   expect(stuckReason([{ ...long, taskId: 'b1' }], true, now)).toBe('')
   expect(stuckReason([{ ...long, need: { kind: 'question', text: 'Pick one' } }], true, now)).toBe('')

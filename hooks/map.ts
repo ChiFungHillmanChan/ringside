@@ -2,7 +2,7 @@
 // started, drawn from this session's own state, the other sessions' board files and
 // the session list (the engine's registry, or the sessions mod). Pure: no `$` here, so it is tested on its own.
 
-import type { FleetFile, Job, Loop, MapNode, NodeKind, NodeStatus, Progress } from '../types'
+import type { Ask, FleetFile, Job, Loop, MapNode, NeedKind, NodeKind, NodeStatus, Progress } from '../types'
 
 export type { FleetFile, MapNode, NodeKind, NodeStatus, Progress }
 export type SessionStatus = 'running' | 'waiting' | 'stuck' | 'idle'
@@ -22,6 +22,9 @@ export type MapSession = {
   contextPercent: number | null
   costUsd: number | null
   nodes: MapNode[]
+  // What it waits on the person for, and the choices it offered (from its board file).
+  needKind?: NeedKind
+  asks?: Ask[]
 }
 
 export type MapNeed = {
@@ -32,6 +35,9 @@ export type MapNeed = {
   since: number
   kind: 'wait' | 'stuck'
   isSelf: boolean
+  // Only the question its answer ended on: the pane lists it, the band leaves it out.
+  isReply?: boolean
+  asks?: Ask[]
 }
 
 type Fields = Record<string, unknown>
@@ -223,6 +229,12 @@ export const REPEAT_FAILS = 3
 
 type Step = Pick<Job, 'tool' | 'detail' | 'startedAt' | 'endedAt' | 'isError' | 'taskId' | 'need'>
 
+// A tool by what it does, for a stuck reason in plain words.
+const STEP_WORD: Record<string, string> = {
+  Bash: 'command', Read: 'file read', Grep: 'search', Glob: 'search', Edit: 'edit', Write: 'edit', MultiEdit: 'edit',
+  NotebookEdit: 'edit', WebFetch: 'page fetch', WebSearch: 'web search', Skill: 'skill', Agent: 'agent start',
+}
+
 // Why one worker (the main loop or a subagent) may be stuck, from its own calls in order; '' when it looks fine.
 export function stuckReason(steps: readonly Step[], isWorking: boolean, now: number): string {
   if (!isWorking) return ''
@@ -235,13 +247,13 @@ export function stuckReason(steps: readonly Step[], isWorking: boolean, now: num
       if (s === undefined || !s.isError || s.tool !== last.tool || s.detail !== last.detail) break
       n += 1
     }
-    if (n >= REPEAT_FAILS) return `the same ${last.tool} failed ${n} times in a row: ${last.detail}`
+    if (n >= REPEAT_FAILS) return `the same ${STEP_WORD[last.tool] ?? 'step'} failed ${n} times in a row: ${last.detail}`
   }
   // Background shells, waits on the person and subagents run long on purpose.
   const live = steps.filter(s => s.endedAt === null && s.taskId === null && s.need === null && s.tool !== 'Agent')
   const oldest = live.reduce<Step | null>((a, s) => (a === null || s.startedAt < a.startedAt ? s : a), null)
   if (oldest !== null) {
-    return now - oldest.startedAt > STUCK_STEP_MS ? `one step has run for ${span(now - oldest.startedAt)}: ${oldest.tool} ${oldest.detail}` : ''
+    return now - oldest.startedAt > STUCK_STEP_MS ? `one step has run for ${span(now - oldest.startedAt)}: ${plainStep(oldest.tool, oldest.detail)}` : ''
   }
   if (steps.some(s => s.endedAt === null)) return ''
   const lastAt = steps.reduce((a, s) => Math.max(a, s.endedAt ?? s.startedAt), 0)
@@ -471,6 +483,8 @@ export function buildMap(self: SelfSession, files: readonly FleetFile[], rows: r
       sessionId: f.sessionId, name: r?.name || f.name || base(f.cwd), branch: f.branch, cwd: f.cwd, isSelf: false, hasMap: true,
       status, doing: f.doing, why: status === 'waiting' ? f.doing : status === 'stuck' ? f.stuck : '', since: r?.since ?? f.heartbeatAt,
       contextPercent: r?.usage?.contextPercent ?? null, costUsd: r?.usage?.costUsd ?? null, nodes: f.nodes,
+      ...(status === 'waiting' && f.needKind !== undefined ? { needKind: f.needKind } : {}),
+      ...(status === 'waiting' && f.asks !== undefined && f.asks.length > 0 ? { asks: f.asks } : {}),
     })
   }
   for (const r of rows) {
@@ -493,7 +507,11 @@ export function needsOf(map: readonly MapSession[]): MapNeed[] {
   const list: MapNeed[] = []
   for (const s of map) {
     if (s.status === 'waiting' || s.status === 'stuck') {
-      list.push({ sessionId: s.sessionId, nodeId: null, where: s.isSelf ? 'this session' : s.name, why: s.why || s.doing, since: s.since, kind: s.status === 'waiting' ? 'wait' : 'stuck', isSelf: s.isSelf })
+      list.push({
+        sessionId: s.sessionId, nodeId: null, where: s.isSelf ? 'this session' : s.name, why: s.why || s.doing, since: s.since, kind: s.status === 'waiting' ? 'wait' : 'stuck', isSelf: s.isSelf,
+        ...(s.status === 'waiting' && s.needKind === 'reply' ? { isReply: true } : {}),
+        ...(s.status === 'waiting' && s.asks !== undefined ? { asks: s.asks } : {}),
+      })
     }
     for (const n of s.nodes) {
       if (n.status !== 'waiting' && n.status !== 'stuck') continue

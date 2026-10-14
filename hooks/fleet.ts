@@ -153,6 +153,17 @@ export const FOCUS_ITERM = [
   'end run',
 ]
 
+export const OPEN_ITERM = [
+  'on run argv',
+  'tell application "iTerm"',
+  'activate',
+  'set w to (create window with default profile)',
+  'tell current session of w to write text (item 1 of argv)',
+  'end tell',
+  'return "ok"',
+  'end run',
+]
+
 export const OPEN_TERMINAL = [
   'on run argv',
   'tell application "Terminal"',

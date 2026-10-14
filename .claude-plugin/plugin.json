@@ -1,6 +1,6 @@
 {
   "name": "ringside",
-  "version": "0.9.1",
+  "version": "0.10.0",
   "description": "Ringside: a ringside seat on every Claude Code session on your computer and what each one started (subagents, background shells, loops), what needs you or may be stuck, a Peek on any of them with Jump there, a task checklist and an agent launcher. Formerly Agent Map.",
   "author": {
     "name": "Hillman Chan",

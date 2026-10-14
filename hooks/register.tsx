@@ -563,7 +563,7 @@ async function jumpTo($: EngineInterface, sessionId: string): Promise<void> {
     ? { sessionId, at, isOk: true, text: row?.jobId != null ? `Opened ${name} in a new Terminal window` : `Switched to ${name}'s terminal (${(row?.tty ?? '').replace('/dev/', '')})` }
     : { sessionId, at, isOk: false, text: `Could not bring ${name} forward${why}` }
   await update($, viewAtom, v => ({ ...v, jump: note }))
-  if (!note.isOk) $.ui.toast(fit(note.text, 160), { timeoutMs: 8_000 })
+  if (!note.isOk) await notify($, note.text, { width: 160, timeoutMs: 8_000 })
 }
 
 // A press runs only as long as the drawing it was pressed on: the pane redraws (a spinner, the
@@ -923,16 +923,42 @@ async function notify($: EngineInterface, text: string, opts: { width?: number; 
   }
 }
 
-// Why a call the pane made did not go through: the deny, the tool's error, or
-// the rejection; null once it went through.
-async function failureOf(call: Promise<{ deny?: string; isError?: true; text?: string }>): Promise<string | null> {
+// What a stop came to: it stopped; it had already ended (the tool's own error
+// says it is not running or not found); or it was refused or failed, so it still
+// runs. A deny is always a refusal: a hook or the person said no.
+export type StopOutcome = { kind: 'stopped' } | { kind: 'gone' } | { kind: 'refused'; why: string }
+
+const GONE = /not running|not found|no (?:such |scheduled )?(?:task|job|cron|shell)|does ?n[o']t exist|already (?:stopped|ended|completed|finished|exited)|unknown (?:task|job|id)/i
+
+// A tool error in plain words, without the tags it reaches the model in.
+const plainError = (text: string): string => oneLine(text.replace(/<\/?tool_use_error>/g, ''))
+
+export function stopOutcomeOf(ran: { deny?: string; isError?: true; text?: string }): StopOutcome {
+  if (ran.deny !== undefined) return { kind: 'refused', why: plainError(ran.deny) || 'refused' }
+  if (ran.isError !== true) return { kind: 'stopped' }
+  const why = plainError(ran.text ?? '')
+  return GONE.test(why) ? { kind: 'gone' } : { kind: 'refused', why: why || 'the tool reported an error' }
+}
+
+async function stopOutcome(call: Promise<{ deny?: string; isError?: true; text?: string }>): Promise<StopOutcome> {
   try {
-    const ran = await call
-    if (ran.deny !== undefined) return oneLine(ran.deny)
-    return ran.isError === true ? oneLine(ran.text ?? 'the tool reported an error') : null
+    return stopOutcomeOf(await call)
   } catch (err) {
-    return oneLine(String(err))
+    return { kind: 'refused', why: oneLine(err instanceof Error ? err.message : String(err)) || 'it failed' }
   }
+}
+
+// Stops sent and not answered yet, by node: a second press sends no second stop.
+const stopping = new Set<string>()
+
+// A stop runs on a timer of its own, outside the press: the press's own redraw
+// would cut off a call still waiting (house rule 6).
+function startStop($: EngineInterface, key: string, run: () => Promise<void>): void {
+  if (stopping.has(key)) return
+  stopping.add(key)
+  $.clock.after(0, () => {
+    void run().catch(() => undefined).finally(() => stopping.delete(key))
+  })
 }
 
 // A post to the board; from the person, it can also wake the recipients' Claude.
@@ -1030,11 +1056,24 @@ async function runSkill($: EngineInterface, name: string, args: string): Promise
 
 async function stopLoop($: EngineInterface, loop: Loop): Promise<void> {
   const id = loop.kind === 'cron' ? loop.id : loop.wakeId
+  // A self-paced loop's next run is known by id once Claude's turn ends: until then there is nothing to delete.
+  if (id === null) return notify($, 'Could not stop the loop yet: its next run is booked when Claude\'s turn ends. Try again then.', { width: 160, timeoutMs: 8_000 })
   const now = await $.clock.now()
+  const done = await stopOutcome($.tool.call({ tool: 'CronDelete', id }))
   // Refused or failed, the loop still runs: it stays on the map.
-  const why = id === null ? null : await failureOf($.tool.call({ tool: 'CronDelete', id }))
-  if (why !== null) return notify($, `Could not stop the loop: ${why}`, { width: 160, timeoutMs: 8_000 })
+  if (done.kind === 'refused') return notify($, `Could not stop the loop: ${done.why}`, { width: 160, timeoutMs: 8_000 })
+  if (done.kind === 'gone') await notify($, 'That loop had already ended.', { timeoutMs: 8_000 })
   await update($, loopsAtom, l => endLoop(l, loop.id, now))
+}
+
+async function stopShell($: EngineInterface, shell: Job): Promise<void> {
+  if (shell.taskId === null) return
+  const now = await $.clock.now()
+  const done = await stopOutcome($.tool.call({ tool: 'TaskStop', task_id: shell.taskId } as never))
+  // Refused or failed, the shell still runs: it stays on the map.
+  if (done.kind === 'refused') return notify($, `Could not stop the shell: ${done.why}`, { width: 160, timeoutMs: 8_000 })
+  if (done.kind === 'gone') await notify($, 'That shell had already ended.', { timeoutMs: 8_000 })
+  await update($, jobs, l => l.map(j => (j.id === shell.id && j.endedAt === null ? { ...j, endedAt: now } : j)))
 }
 
 async function useResult($: EngineInterface, card: AgentCard): Promise<void> {
@@ -1314,7 +1353,8 @@ export const register: Register = on => {
 
     if (!isQuiet) {
       const taskId = tool === 'Bash' ? str(result.backgroundTaskId) : ''
-      if (tool === 'TaskStop' && !isError) {
+      // A TaskStop that went through, or found the shell already gone, ends it; a refused one does not.
+      if (tool === 'TaskStop' && stopOutcomeOf(ran).kind !== 'refused') {
         const stopped = str(input.task_id) || str(input.shell_id)
         await update($, jobs, l => l.map(j => (j.taskId === stopped && j.endedAt === null ? { ...j, endedAt } : j)))
       }
@@ -1651,7 +1691,7 @@ export const register: Register = on => {
         n !== undefined && n.progress !== null && detail(`prog:${agentId}`, 'steps', `${bar(n.progress)}${n.progress.note === '' ? '' : ` · ${n.progress.note}`} (savvy-progress)`, 1, 'magenta', peekW),
         by !== '' && detail(`by:${agentId}`, '', by, 1, undefined, peekW),
         extra !== '' && detail(`cost:${agentId}`, '', extra, 1, undefined, peekW),
-        peekState.error !== '' && <Text key={`agent-err:${agentId}`} color="red">{fit(peekState.error, peekW)}</Text>,
+        peekState.error !== '' && <Text key={`agent-err:${agentId}`} color="red">{fit(m(peekState.error), peekW)}</Text>,
         ...peekState.lines.map((l, i) => (
           <Box key={`step:${agentId}:${i}`}>
             <Text color={PEEK_COLOR[l.kind]}>{l.kind === 'running' ? spin : PEEK_GLYPH[l.kind]} </Text>
@@ -1724,7 +1764,7 @@ export const register: Register = on => {
                 <Text dimColor>to</Text>
                 <Button key="hub-to-all" plain dimColor={hb.to !== 'all'} label={hb.to === 'all' ? '[all]' : 'all'} onPress={() => update($, hubAtom, x => ({ ...x, to: 'all' }))} />
                 {others.slice(0, 6).map(x => (
-                  <Button key={`hub-member:${x.sessionId}`} plain dimColor={hb.to !== x.sessionId} label={hb.to === x.sessionId ? `[${fit(x.name, 16)}]` : fit(x.name, 16)} onPress={() => update($, hubAtom, y => ({ ...y, to: y.to === x.sessionId ? 'all' : x.sessionId }))} />
+                  <Button key={`hub-member:${x.sessionId}`} plain dimColor={hb.to !== x.sessionId} label={hb.to === x.sessionId ? `[${fit(m(x.name), 16)}]` : fit(m(x.name), 16)} onPress={() => update($, hubAtom, y => ({ ...y, to: y.to === x.sessionId ? 'all' : x.sessionId }))} />
                 ))}
               </Box>
               {hb.messages.slice(-SHOWN_MESSAGES).map(msg => {
@@ -1737,12 +1777,12 @@ export const register: Register = on => {
                   </Box>
                 )
               })}
-              {Input !== null && <Input key="hub-say" label={`to ${fit(toMember?.name ?? 'all', 14)} › `} placeholder="note for this repo, Enter posts" submitLabel="post" onSubmit={value => hubSay($, value)} />}
+              {Input !== null && <Input key="hub-say" label={`to ${fit(m(toMember?.name ?? 'all'), 14)} › `} placeholder="note for this repo, Enter posts" submitLabel="post" onSubmit={value => hubSay($, value)} />}
               <Box gap={1}>
                 <Button key="hub-wake" plain dimColor={!hb.wake} label={hb.wake ? '[wake: on]' : '[wake: off]'} onPress={() => update($, hubAtom, x => ({ ...x, wake: !x.wake }))} />
                 <Button key="hub-report" plain label="[report]" onPress={() => reportHub($)} />
               </Box>
-              {hb.note !== '' && <Text dimColor>{fit(hb.note, peekW)}</Text>}
+              {hb.note !== '' && <Text dimColor>{fit(m(hb.note), peekW)}</Text>}
             </Box>
           )}
           {closeRow}
@@ -1761,13 +1801,8 @@ export const register: Register = on => {
           return
         }
         await update($, viewAtom, v => ({ ...v, confirm: null }))
-        if (loop !== undefined) await stopLoop($, loop)
-        if (shell !== undefined && shell.taskId !== null) {
-          const ranAt = await $.clock.now()
-          const why = await failureOf($.tool.call({ tool: 'TaskStop', task_id: shell.taskId } as never))
-          if (why !== null) await notify($, `Could not stop the shell: ${why}`, { width: 160, timeoutMs: 8_000 })
-          else await update($, jobs, l => l.map(j => (j.id === shell.id ? { ...j, endedAt: ranAt } : j)))
-        }
+        if (loop !== undefined) startStop($, n.id, () => stopLoop($, loop))
+        if (shell !== undefined) startStop($, n.id, () => stopShell($, shell))
       }
       const lt = loop === undefined ? null : loopLines(loop, now, m0.isWorking)
       return (
@@ -1776,8 +1811,8 @@ export const register: Register = on => {
             <Text bold color={loop !== undefined ? 'cyan' : 'magenta'}>{title}</Text>
             <Text bold>{`  ${fit(m(s.isSelf ? n.title : `${s.name} › ${n.title}`), peekW - title.length - 2)}`}</Text>
           </Box>
-          {lt !== null && <Text>{fit(lt.head, peekW)}</Text>}
-          {lt !== null && wrap(lt.detail, peekW, 3).map((l, i) => <Text key={`loopd:${n.id}:${i}`} dimColor>{l}</Text>)}
+          {lt !== null && <Text>{fit(m(lt.head), peekW)}</Text>}
+          {lt !== null && wrap(m(lt.detail), peekW, 3).map((l, i) => <Text key={`loopd:${n.id}:${i}`} dimColor>{l}</Text>)}
           {lt === null && detail(`state:${n.id}`, 'state', `${STATUS_WORD[n.status]}${n.status === 'waiting' || n.status === 'stuck' ? ` · ${n.why}` : ''}`, 3, n.status === 'waiting' ? 'yellow' : n.status === 'stuck' ? STUCK_COLOR : undefined, peekW)}
           {lt === null && n.now !== '' && detail(`now:${n.id}`, 'now', n.now, 2, 'cyan', peekW)}
           {n.raw !== '' && (loop !== undefined || (n.status !== 'done' && n.status !== 'failed')) && detail(`raw:${n.id}`, loop !== undefined ? 'prompt' : 'tool', n.raw, 2, undefined, peekW)}
@@ -1791,7 +1826,7 @@ export const register: Register = on => {
           )}
           {!s.isSelf && (
             <Box gap={1} marginTop={1}>
-              <Button key={`jump:${s.sessionId}`} label={`Jump to ${fit(s.name, 20)}`} variant="primary" onPress={() => startJump($, s.sessionId)} />
+              <Button key={`jump:${s.sessionId}`} label={`Jump to ${fit(m(s.name), 20)}`} variant="primary" onPress={() => startJump($, s.sessionId)} />
             </Box>
           )}
           {!s.isSelf && view.jump != null && view.jump.sessionId === s.sessionId && (view.jump.at === 0 || now - view.jump.at < 60_000) && (
@@ -1963,7 +1998,7 @@ export const register: Register = on => {
               <Box>
                 <Text color={c.kind === 'agent' ? dotColor(c) : 'claude'}>{c.kind === 'agent' ? '● ' : '/ '}</Text>
                 <Button key={`pick:${key}`} plain label={c.name} onPress={pick(c)}>
-                  <Text bold>{fit(c.name, nameRoom)}</Text>
+                  <Text bold>{fit(m(c.name), nameRoom)}</Text>
                   {tag === '' ? '' : <Text dimColor>{`  ${fit(tag, 14)}`}</Text>}
                 </Button>
               </Box>
@@ -1974,7 +2009,7 @@ export const register: Register = on => {
                 ? <Button key="launch-back" label="cancel" onPress={unpick} />
                 : first !== undefined
                   ? (
-                    <Button key={`running:${key}`} plain label={`${c.name} running`} onPress={openRun(first.id)}>
+                    <Button key={`running:${key}`} plain label={`${m(c.name)} running`} onPress={openRun(first.id)}>
                       <Text color="magenta">{fit(`${spin} ${live.length > 1 ? `${live.length} running` : `running · ${dur(now - first.from)}`}`, rightW)}</Text>
                     </Button>
                   )

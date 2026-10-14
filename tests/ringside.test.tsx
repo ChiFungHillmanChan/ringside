@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import {
-  applyTaskCall, cellWidth, describeCall, elsewhereNeeds, endGoneShells, groupNow, isStale, lastQuestion, mergeAgents, needOf, peekOf, presenceOf, trimJobs,
+  applyTaskCall, cellWidth, describeCall, elsewhereNeeds, endGoneShells, groupNow, isStale, lastQuestion, mergeAgents, needOf, peekOf, presenceOf, stopOutcomeOf, trimJobs,
 } from '../hooks/register'
 import type { HubFile } from '../hooks/hub'
 import type { AgentRow, HubMessage, Job, MainState } from '../types'
@@ -361,6 +361,7 @@ test('a loop is a node of this session: opened, how often, since when, its next 
   expect(deleted).toEqual([])
   expect(String((await ui.find({ key: 'loop-stop:c1' }))?.props.label)).toBe('Press again to stop')
   await ui.press({ key: 'loop-stop:c1' })
+  await clock.settle()
   expect(deleted).toEqual(['c1'])
   expect(await ui.find({ key: 'node:self:loop:c1' })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: 'That one has ended or left the map.' })).toBeDefined()
@@ -975,7 +976,7 @@ test('recording mode masks the desktop drawing too', async ($, on) => {
 })
 
 test('a stop the engine refuses leaves the loop and the shell on the map, and says so', async ($, on) => {
-  mock.clock(on, { now: at(14, 2, 30) })
+  const clock = mock.clock(on, { now: at(14, 2, 30) })
   mock.env(on, { HOME: '/Users/test' })
   host(on)
   const toasts: string[] = []
@@ -995,6 +996,7 @@ test('a stop the engine refuses leaves the loop and the shell on the map, and sa
   await ui.press({ key: 'node:self:loop:c1' })
   await ui.press({ key: 'loop-stop:c1' })
   await ui.press({ key: 'loop-stop:c1' })
+  await clock.settle()
   expect(await ui.find({ key: 'node:self:loop:c1' })).toBeDefined()
   expect(toasts.some(t => /^Could not stop the loop: The user declined/.test(t))).toBe(true)
   await ui.press({ key: 'peek-close' })
@@ -1005,6 +1007,7 @@ test('a stop the engine refuses leaves the loop and the shell on the map, and sa
   const stopKey = `job-stop:${String(key).replace(/^node:self:/, '')}`
   await ui.press({ key: stopKey })
   await ui.press({ key: stopKey })
+  await clock.settle()
   expect(await shellKey(ui)).toBe(key)
   expect(toasts.some(t => /^Could not stop the shell: The user declined/.test(t))).toBe(true)
   await ui.unmount()
@@ -1017,7 +1020,7 @@ test('a TaskStop of Claude\'s that fails leaves the shell running', async ($, on
   on('tool.call', { tool: 'Bash' }, () => ({ result: BACKGROUND }))
   let isAllowed = false
   on('tool.call', { tool: 'TaskStop' }, ($, e) =>
-    isAllowed ? { result: { message: 'stopped', task_id: e.task_id ?? '', task_type: 'shell' } } : { deny: 'No such task' })
+    isAllowed ? { result: { message: 'stopped', task_id: e.task_id ?? '', task_type: 'shell' } } : { deny: 'The user declined' })
   await $.session.start({ cwd: '/Users/test/proj', surface: null, isInteractive: false })
   await $.tool.call({ tool: 'Bash', command: 'npm run dev', description: 'Start the dev server', run_in_background: true })
   await $.tool.call({ tool: 'TaskStop', task_id: 'b1' })
@@ -1060,5 +1063,128 @@ test('a background shell leaves the map once a Stop no longer lists it', async (
   await $.classic.Stop({ stop_hook_active: false, background_tasks: [] })
   ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await shellKey(ui)).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a stop reads as refused, already ended, or done; a deny is always a refusal', () => {
+  expect(stopOutcomeOf({ text: 'stopped' })).toEqual({ kind: 'stopped' })
+  expect(stopOutcomeOf({ deny: 'The user declined' })).toEqual({ kind: 'refused', why: 'The user declined' })
+  expect(stopOutcomeOf({ deny: 'No such task' })).toEqual({ kind: 'refused', why: 'No such task' })
+  expect(stopOutcomeOf({ deny: '' })).toEqual({ kind: 'refused', why: 'refused' })
+  expect(stopOutcomeOf({ isError: true, text: '<tool_use_error>Task b1 is not running (status: completed)</tool_use_error>' })).toEqual({ kind: 'gone' })
+  expect(stopOutcomeOf({ isError: true, text: 'No task found with ID: b1' })).toEqual({ kind: 'gone' })
+  expect(stopOutcomeOf({ isError: true, text: '<tool_use_error>kill failed: EPERM</tool_use_error>' })).toEqual({ kind: 'refused', why: 'kill failed: EPERM' })
+  expect(stopOutcomeOf({ isError: true })).toEqual({ kind: 'refused', why: 'the tool reported an error' })
+})
+
+test('stopping a shell that had already ended takes it off the map and says so; so does Claude\'s own TaskStop', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  mock.env(on, { HOME: '/Users/test' })
+  host(on)
+  const toasts: string[] = []
+  on('ui.toast', ($, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  let n = 0
+  on('tool.call', { tool: 'Bash' }, () => ({ result: { ...BACKGROUND, backgroundTaskId: `b${(n += 1)}` } }))
+  on('tool.call', { tool: 'TaskStop' }, ($, e) => ({ isError: true as const, result: undefined, text: `<tool_use_error>Task ${e.task_id ?? ''} is not running (status: completed)</tool_use_error>` }))
+  await $.session.start({ cwd: '/Users/test/proj', surface: null, isInteractive: false })
+  await $.tool.call({ tool: 'Bash', command: 'npm run dev', description: 'Start the dev server', run_in_background: true })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const key = String(await shellKey(ui))
+  await ui.press({ key })
+  const stopKey = `job-stop:${key.replace(/^node:self:/, '')}`
+  await ui.press({ key: stopKey })
+  await ui.press({ key: stopKey })
+  await clock.settle()
+  expect(await shellKey(ui)).toBeUndefined()
+  expect(toasts).toContain('That shell had already ended.')
+  await ui.unmount()
+
+  await $.tool.call({ tool: 'Bash', command: 'npm run watch', description: 'Watch the files', run_in_background: true })
+  await $.tool.call({ tool: 'TaskStop', task_id: 'b2' })
+  const after = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await shellKey(after)).toBeUndefined()
+  await after.unmount()
+})
+
+test('a self-paced loop whose next run is not booked yet is not claimed stopped', async ($, on) => {
+  const clock = mock.clock(on, { now: at(9, 0) })
+  mock.env(on, { HOME: '/Users/test' })
+  host(on)
+  const toasts: string[] = []
+  on('ui.toast', ($, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  const deleted: string[] = []
+  on('tool.call', { tool: 'CronDelete' }, ($, e) => {
+    deleted.push(e.id)
+    return { result: { id: e.id } }
+  })
+  on('tool.call', { tool: 'ScheduleWakeup' }, () => ({ result: { scheduledFor: at(9, 20), clampedDelaySeconds: 1200, wasClamped: false } }))
+  await $.session.start({ cwd: '/Users/test/proj', surface: null, isInteractive: false })
+  await $.tool.call({ tool: 'ScheduleWakeup', delaySeconds: 1200, reason: 'watching CI run', prompt: '/loop watch CI' })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const loopKey = String((await ui.findAll({ type: 'Button' })).find(b => String(b.key).startsWith('node:self:loop:'))?.key)
+  await ui.press({ key: loopKey })
+  const stopKey = String((await ui.findAll({ type: 'Button' })).find(b => String(b.key).startsWith('loop-stop:'))?.key)
+  await ui.press({ key: stopKey })
+  await ui.press({ key: stopKey })
+  await clock.settle()
+  expect(deleted).toEqual([])
+  expect(await ui.find({ key: loopKey })).toBeDefined()
+  expect(toasts.some(t => /^Could not stop the loop yet/.test(t))).toBe(true)
+  await ui.unmount()
+})
+
+test('recording mode hides a hidden word everywhere the pane draws it, toasts included', async ($, on) => {
+  const clock = mock.clock(on, { now: at(9, 0) })
+  mock.env(on, { HOME: '/Users/test', CLAUDE_MODS_RECORDING: '1', CLAUDE_MODS_RECORDING_TERMS: JSON.stringify(['falcon']) })
+  host(on)
+  const toasts: string[] = []
+  on('ui.toast', ($, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  on('tool.call', { tool: 'Bash' }, () => ({ result: BACKGROUND }))
+  on('tool.call', { tool: 'TaskStop' }, () => ({ deny: 'falcon is protected' }))
+  on('tool.call', { tool: 'ScheduleWakeup' }, () => ({ result: { scheduledFor: at(9, 20), clampedDelaySeconds: 1200, wasClamped: false } }))
+  await $.session.start({ cwd: '/Users/test/falcon-site', surface: null, isInteractive: false })
+  await $.tool.call({ tool: 'Bash', command: 'npm run dev', description: 'Serve falcon', run_in_background: true })
+  await $.tool.call({ tool: 'ScheduleWakeup', delaySeconds: 1200, reason: 'watching falcon deploy', prompt: '/loop watch falcon' })
+  await $.classic.Stop({ stop_hook_active: false, session_crons: [{ id: 'w1', schedule: '20 9 12 10 *', recurring: false, prompt: '/loop watch falcon' }] })
+  await clock.settle()
+
+  const leaks = async (ui: { find: (q: { type: string; text: RegExp }) => Promise<unknown>; findAll: (q: { type: string }) => Promise<{ props: Record<string, unknown> }[]> }): Promise<string[]> => [
+    ...((await ui.find({ type: 'Text', text: /falcon/i })) === undefined ? [] : ['a Text']),
+    ...(await ui.findAll({ type: 'Button' })).map(b => String(b.props.label ?? '')).filter(l => /falcon/i.test(l)),
+    ...(await ui.findAll({ type: 'Svg' })).map(x => String(x.props.source ?? '')).filter(x => /falcon/i.test(x)).map(() => 'the drawing'),
+  ]
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    expect(await leaks(ui)).toEqual([])
+    for (const prefix of ['node:self:loop:', 'node:self:job:', 'session:']) {
+      const key = (await ui.findAll({ type: 'Button' })).map(b => String(b.key)).find(k => k.startsWith(prefix))
+      if (key === undefined) continue
+      await ui.press({ key })
+      expect(await leaks(ui)).toEqual([])
+      await ui.press({ key: 'peek-close' }).catch(() => undefined)
+    }
+    await ui.unmount()
+  }
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const key = String(await shellKey(ui))
+  await ui.press({ key })
+  const stopKey = `job-stop:${key.replace(/^node:self:/, '')}`
+  await ui.press({ key: stopKey })
+  await ui.press({ key: stopKey })
+  await clock.settle()
+  expect(toasts.some(t => t.startsWith('Could not stop the shell: [hidden] is protected'))).toBe(true)
+  expect(toasts.some(t => /falcon/i.test(t))).toBe(false)
   await ui.unmount()
 })

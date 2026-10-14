@@ -20,10 +20,10 @@ import { mask, recordingTerms } from './mask'
 
 export { cellWidth, fit, span, wrap }
 
-const PANE = 'agent-map'
-const SELF = 'agent-map'
-const TITLE = 'Agent Map'
-const HUB_TOOL = 'mcp__agent-map__hub'
+const PANE = 'ringside'
+const SELF = 'ringside'
+const TITLE = 'Ringside'
+const HUB_TOOL = 'mcp__ringside__hub'
 // Ended work stays listed this long, so you see what finished while you looked away.
 const ENDED_KEEP_MS = 10 * 60 * 1000
 // A call that succeeded faster than this is counted, not listed.
@@ -62,35 +62,35 @@ const BUILTIN_AGENTS: CatalogEntry[] = [
   { kind: 'agent', name: 'Plan', description: 'Software architect agent for designing implementation plans.', source: 'built-in' },
 ]
 const HUB_TOOL_DESCRIPTION = [
-  'The repo hub (Agent Map): every Claude session working in this same git repository, and a shared board.',
+  'The repo hub (Ringside): every Claude session working in this same git repository, and a shared board.',
   'action "read": each session here (state, branch, what it is doing, its loops and running subagents), this session\'s own loops,',
   'subagents and tasks, and the board\'s recent messages. Use it to monitor the repo or when the person asks for a status report.',
   'action "post": leave a note on the board for the person and the other sessions ("to": "all" by default, or a session name from read).',
   'Posts never start another session\'s turn. Sessions in other repositories are never included.',
 ].join(' ')
 
-const jobs = atom({ plugin: 'agent-map', key: 'jobs' } as const, [])
-const goal = atom({ plugin: 'agent-map', key: 'goal' } as const, { startedAt: null, tasks: [] })
-const agents = atom({ plugin: 'agent-map', key: 'agents' } as const, [])
-const cardsAtom = atom({ plugin: 'agent-map', key: 'cards' } as const, [])
-const loopsAtom = atom({ plugin: 'agent-map', key: 'loops' } as const, [])
-const catalogAtom = atom({ plugin: 'agent-map', key: 'catalog' } as const, BUILTIN_AGENTS)
-const launchAtom = atom({ plugin: 'agent-map', key: 'launch' } as const, NO_LAUNCH)
-const hubAtom = atom({ plugin: 'agent-map', key: 'hub' } as const, NO_HUB)
-const main = atom({ plugin: 'agent-map', key: 'main' } as const, IDLE_MAIN)
-const peek = atom({ plugin: 'agent-map', key: 'peek' } as const, NO_PEEK)
-const cwdAtom = atom({ plugin: 'agent-map', key: 'cwd' } as const, '')
+const jobs = atom({ plugin: 'ringside', key: 'jobs' } as const, [])
+const goal = atom({ plugin: 'ringside', key: 'goal' } as const, { startedAt: null, tasks: [] })
+const agents = atom({ plugin: 'ringside', key: 'agents' } as const, [])
+const cardsAtom = atom({ plugin: 'ringside', key: 'cards' } as const, [])
+const loopsAtom = atom({ plugin: 'ringside', key: 'loops' } as const, [])
+const catalogAtom = atom({ plugin: 'ringside', key: 'catalog' } as const, BUILTIN_AGENTS)
+const launchAtom = atom({ plugin: 'ringside', key: 'launch' } as const, NO_LAUNCH)
+const hubAtom = atom({ plugin: 'ringside', key: 'hub' } as const, NO_HUB)
+const main = atom({ plugin: 'ringside', key: 'main' } as const, IDLE_MAIN)
+const peek = atom({ plugin: 'ringside', key: 'peek' } as const, NO_PEEK)
+const cwdAtom = atom({ plugin: 'ringside', key: 'cwd' } as const, '')
 // Claude's own folder: CLAUDE_CONFIG_DIR, else ~/.claude ('' until the session starts).
-const homeAtom = atom({ plugin: 'agent-map', key: 'claudeDir' } as const, '')
-const isShown = atom({ plugin: 'agent-map', key: 'isShown' } as const, false)
-const fleetAtom = atom({ plugin: 'agent-map', key: 'fleet' } as const, [])
-const viewAtom = atom({ plugin: 'agent-map', key: 'view' } as const, NO_VIEW)
+const homeAtom = atom({ plugin: 'ringside', key: 'claudeDir' } as const, '')
+const isShown = atom({ plugin: 'ringside', key: 'isShown' } as const, false)
+const fleetAtom = atom({ plugin: 'ringside', key: 'fleet' } as const, [])
+const viewAtom = atom({ plugin: 'ringside', key: 'view' } as const, NO_VIEW)
 // Other mods' state, read only if installed and only in the shape we know (see map.ts adapters).
 const savvyAgents = atom({ plugin: 'savvy-progress', key: 'agents' } as never, [] as never)
 const flightAgents = atom({ plugin: 'flightdeck', key: 'agents' } as never, [] as never)
 const flightLoops = atom({ plugin: 'flightdeck', key: 'loops' } as never, [] as never)
 // Every session on this computer as this mod reads it from the engine's registry.
-const localSessions = atom({ plugin: 'agent-map', key: 'sessions' } as const, [])
+const localSessions = atom({ plugin: 'ringside', key: 'sessions' } as const, [])
 // The sessions mod's list and the ones the person hid there, used instead when that mod is loaded.
 const sessionsModRows = atom({ plugin: 'sessions', key: 'rows' } as never, [] as never)
 const sessionsModHidden = atom({ plugin: 'sessions', key: 'hidden' } as never, [] as never)
@@ -575,6 +575,8 @@ export function peekOf(messages: readonly MessageLike[], max = SHOWN_PEEK): { ta
     const text = oneLine(msg.text)
     if (text !== '') lines.push({ kind: 'text', text })
     for (const u of msg.toolUses) {
+      // Its hand-back is the answer, shown on its own below the steps.
+      if (u.tool === 'SubagentHandback') continue
       const kind = u.isError === true ? 'failed' : u.result === undefined ? 'running' : 'done'
       lines.push({ kind, text: `${toolLabel(u.tool)} ${describeCall(u.tool, u.input)}` })
     }
@@ -930,7 +932,7 @@ async function hubSay($: EngineInterface, text: string): Promise<void> {
 async function reportHub($: EngineInterface): Promise<void> {
   await update($, hubAtom, s => ({ ...s, note: 'Asked Claude for a report.' }))
   await $.prompt.submit({
-    text: `Give me a short status report of this repo from the Agent Map hub (call ${HUB_TOOL} with action "read"): each session, what it is doing, its loops and subagents, anything blocked or waiting on me, and board notes nobody answered.`,
+    text: `Give me a short status report of this repo from the Ringside hub (call ${HUB_TOOL} with action "read"): each session, what it is doing, its loops and subagents, anything blocked or waiting on me, and board notes nobody answered.`,
   })
 }
 
@@ -1045,8 +1047,8 @@ export const register: Register = on => {
     await update($, launchAtom, l => ({ ...NO_LAUNCH, ...l, note: '' }))
     offerSeen = new Set()
     await $.command.register({
-      name: 'agent-map',
-      description: 'Agent Map: every Claude session on this computer and what each started, what needs you, tasks, launcher',
+      name: 'ringside',
+      description: 'Ringside: every Claude session on this computer and what each started, what needs you, tasks, launcher',
       argumentHint: '[map|tasks|launch|zoom auto|cards|lines|dots|close|clear|say <text>|report]',
     })
     try {
@@ -1118,16 +1120,16 @@ export const register: Register = on => {
     return next(e)
   })
 
-  on('command.run', { command: 'agent-map' }, async ($, e) => {
+  on('command.run', { command: 'ringside' }, async ($, e) => {
     const arg = e.args.trim()
     const [verb = '', ...rest] = arg.split(/\s+/)
     if (verb === 'close') {
       await $.ui.close({ id: PANE })
-      return { text: 'Agent Map closed. /agent-map opens it again.' }
+      return { text: 'Ringside closed. /ringside opens it again.' }
     }
     if (verb === 'clear') {
       await reset($)
-      return { text: 'Agent Map cleared.' }
+      return { text: 'Ringside cleared.' }
     }
     if (verb === 'say') {
       const note = await postHub($, rest.join(' '), 'person', 'all')
@@ -1154,7 +1156,7 @@ export const register: Register = on => {
     }
     // Asked for by name: raise it over the other tabs (Filetree, Flightdeck) when the prompt is empty.
     const opened = await $.ui.open({ id: PANE, title: TITLE, focus: true })
-    return { text: opened.isPlaced ? 'Agent Map open.' : 'Agent Map opens once the window is wide enough.' }
+    return { text: opened.isPlaced ? 'Ringside open.' : 'Ringside opens once the window is wide enough.' }
   })
 
   on('prompt.submit', async ($, e, next) => {
@@ -1639,7 +1641,7 @@ export const register: Register = on => {
       const jump = view.jump != null && view.jump.sessionId === s.sessionId && (view.jump.at === 0 || now - view.jump.at < 60_000) ? view.jump : null
       const runs = s.nodes.length > 0 ? s.nodes.map(n => n.title.split(' · ')[0]).join(', ')
         : s.hasMap ? 'nothing started'
-          : 'not shared: that session does not run Agent Map yet (a session started now will)'
+          : 'not shared: that session does not run Ringside yet (a session started now will)'
       return (
         <Box key={`peek:session:${s.sessionId}`} flexDirection="column" borderStyle="round" borderColor={s.isSelf ? 'claude' : tone === 'gray' ? 'blue' : tone} paddingX={1}>
           <Box>
@@ -1990,7 +1992,7 @@ export const register: Register = on => {
           {kindCard('agent', `Agents ${agentCount}`)}
           {kindCard('skill', `Skills ${skillCount}`)}
         </Box>
-        {Input !== null && <Input key="launch-filter" label="find › " placeholder="type to filter, Enter picks the first" value={launch.query} onInput={value => update($, launchAtom, l => ({ ...l, query: value }))} onSubmit={async value => {
+        {Input !== null && <Input key="launch-filter" label="find" placeholder="type to filter, Enter picks the first" value={launch.query} onInput={value => update($, launchAtom, l => ({ ...l, query: value }))} onSubmit={async value => {
           const firstMatch = filterCatalog(catalogList, launch.kind, value)[0]
           if (firstMatch === undefined) return
           await update($, launchAtom, l => ({ ...l, query: value, picked: firstMatch.name, seq: (l.seq ?? 0) + 1 }))

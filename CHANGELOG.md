@@ -1,5 +1,20 @@
 # Changelog
 
+All notable changes to Ringside are listed here. Versions follow [semantic versioning](https://semver.org/).
+
+## Unreleased
+
+## 0.9.0 (2026-10-14)
+
+Agent Map is now **Ringside**.
+
+- The plugin, the marketplace and the command are renamed: `/ringside` (was `/agent-map`). Claude's board tool is now `mcp__ringside__hub`, and each session's file lives under `~/.claude/mods-data/ringside/`. The README's "Coming from Agent Map" section shows how to switch.
+- The repository moved to [ChiFungHillmanChan/ringside](https://github.com/ChiFungHillmanChan/ringside). Old links redirect.
+- Agent dots in the launcher use clearer colours, so blue and purple no longer look alike.
+- A subagent's Peek no longer lists its hand-back as a step. Its answer still shows below the steps.
+- The launcher's filter box now reads `find:` (it read `find › :`).
+- A new README with a walkthrough GIF of the terminal and a guide to every tab, plus CONTRIBUTING, CODE_OF_CONDUCT, SECURITY, issue and pull request templates, and CI that validates and tests every change.
+
 ## 0.8.0 (2026-10-14)
 
 - Map, Tasks and Launch are three cards at the top, the one shown in the accent colour.

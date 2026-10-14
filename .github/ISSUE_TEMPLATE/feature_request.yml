@@ -1,0 +1,32 @@
+name: Feature request
+description: An idea that would make Ringside more useful.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What were you trying to do, and what got in the way? Start from the problem, not the solution.
+      placeholder: When I run five sessions, I cannot tell which one changed the file I am looking at.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you would like
+      description: How could Ringside help? A sketch of the pane is welcome.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Other ways you have tried
+      description: Workarounds, other mods, or other tools you looked at.
+  - type: checkboxes
+    id: rules
+    attributes:
+      label: House rules
+      description: Ringside never holds or changes your prompt or tool calls, makes no network requests, and stays quiet above the prompt. See CONTRIBUTING.md.
+      options:
+        - label: My idea fits these rules, or I explain above why it should bend one.
+          required: true

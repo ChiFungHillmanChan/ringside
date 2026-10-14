@@ -8,18 +8,18 @@ import type { HubFile } from '../hooks/hub'
 import type { AgentRow, HubMessage, Job, MainState } from '../types'
 
 const BAND = {
-  plugin: 'agent-map',
+  plugin: 'ringside',
   component: 'AbovePrompt',
   props: { hasSurvey: false, isWorking: true, maxRows: 10, bodyColumns: 110, scroll: { offset: 0, bodyRows: 10 }, view: {} },
   viewport: { columns: 120, rows: 40, isFullscreen: true },
 } as const
 
 const PANE = {
-  plugin: 'agent-map',
+  plugin: 'ringside',
   component: 'Pane',
-  requestId: 'agent-map',
+  requestId: 'ringside',
   props: {
-    title: 'Agent Map',
+    title: 'Ringside',
     isFocused: false,
     bodyColumns: 48,
     placement: 'dock',
@@ -33,7 +33,7 @@ const PANE = {
 function host(on: On, over: { agents?: boolean; fs?: boolean; process?: boolean; commands?: string[] } = {}): void {
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
-  on('tool.register', ($, e) => ({ value: { tool: `mcp__agent-map__${e.name}` } }))
+  on('tool.register', ($, e) => ({ value: { tool: `mcp__ringside__${e.name}` } }))
   on('command.list', () => ({ value: (over.commands ?? []).map(name => ({ name, description: '', source: 'plugin' as const })) } as never))
   if (over.process !== false) on('process.run', () => ({ value: { exitCode: 128, stdout: '', stderr: 'not a git repository', isStdoutTruncated: false, isStderrTruncated: false } }))
   if (over.agents !== false) on('agent.list', () => ({ value: [] }))
@@ -230,6 +230,7 @@ test('cuts a subagent transcript to its task and latest steps', () => {
     { role: 'user', text: 'Audit  the API', toolUses: [] },
     { role: 'assistant', text: '', toolUses: [{ tool: 'Bash', input: { command: 'npm test' }, result: 'ok' }, { tool: 'Bash', input: { command: 'npm run build' }, isError: true, result: 'fail' }] },
     { role: 'assistant', text: 'Build fails on types.', toolUses: [{ tool: 'Edit', input: { file_path: '/p/a.ts' } }] },
+    { role: 'assistant', text: '', toolUses: [{ tool: 'SubagentHandback', input: { result: 'Build fails on types.' }, result: 'ok' }] },
   ], 3)
   expect(p.task).toBe('Audit the API')
   expect(p.lines).toEqual([
@@ -397,7 +398,7 @@ test('the launcher starts an agent type with a task and runs a skill with args',
   mock.env(on, { HOME: '/Users/test' })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
-  on('tool.register', ($, e) => ({ value: { tool: `mcp__agent-map__${e.name}` } }))
+  on('tool.register', ($, e) => ({ value: { tool: `mcp__ringside__${e.name}` } }))
   on('process.run', () => ({ value: { exitCode: 128, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
   on('agent.list', () => ({ value: [] }))
   on('session.id', () => ({ value: 'test-session' }))
@@ -406,7 +407,7 @@ test('the launcher starts an agent type with a task and runs a skill with args',
     value: [
       { name: 'ship-it', description: 'Ship the branch end to end.', source: 'user' as const },
       { name: 'clear', description: 'Clear the conversation.', source: 'builtin' as const },
-      { name: 'agent-map', description: 'This pane.', source: 'plugin' as const, plugin: 'agent-map' },
+      { name: 'ringside', description: 'This pane.', source: 'plugin' as const, plugin: 'ringside' },
     ],
   }))
   const spawned: { prompt: string; description: string; subagentType: string }[] = []
@@ -468,7 +469,7 @@ test('the launcher starts an agent type with a task and runs a skill with args',
   await ui.press({ key: 'launch-kind:skill' })
   expect(await ui.find({ key: 'pick:skill:ship-it' })).toBeDefined()
   expect(await ui.find({ key: 'pick:skill:clear' })).toBeUndefined()
-  expect(await ui.find({ key: 'pick:skill:agent-map' })).toBeUndefined()
+  expect(await ui.find({ key: 'pick:skill:ringside' })).toBeUndefined()
   await ui.input({ key: 'launch-filter', text: 'zzz', kind: 'change' })
   expect(await ui.find({ key: 'pick:skill:ship-it' })).toBeUndefined()
   await ui.input({ key: 'launch-filter', text: 'ship', kind: 'change' })
@@ -480,7 +481,7 @@ test('the launcher starts an agent type with a task and runs a skill with args',
 })
 
 const HOME = '/Users/test'
-const DIR = `${HOME}/.claude/mods-data/agent-map/hub/-Users-test-proj`
+const DIR = `${HOME}/.claude/mods-data/ringside/hub/-Users-test-proj`
 
 function boardFile(over: Partial<HubFile> & { sessionId: string }): string {
   const f: HubFile = {
@@ -506,7 +507,7 @@ test('the map shows every session on this computer with what each started; the b
     nodes: [{ id: 'a9', kind: 'agent', title: 'tester · run e2e', status: 'running', now: 'running tests', raw: '', why: '', from: start - 30_000, to: null, progress: null, costUsd: null, tokens: null }],
   }))
   files.set(`${DIR}/gone.json`, boardFile({ sessionId: 'gone', name: 'old-chat', heartbeatAt: start - 60 * 60_000 }))
-  files.set(`${HOME}/.claude/mods-data/agent-map/hub/-Users-test-elsewhere/far.json`, boardFile({
+  files.set(`${HOME}/.claude/mods-data/ringside/hub/-Users-test-elsewhere/far.json`, boardFile({
     sessionId: 'far', name: 'elsewhere', root: '/Users/test/elsewhere', cwd: '/Users/test/elsewhere', heartbeatAt: start, state: 'needs', doing: 'approve Bash',
     messages: [note({ id: 'f1', at: start, fromId: 'far', fromName: 'elsewhere', text: 'not for this repo' })],
   }))
@@ -585,18 +586,18 @@ test("Claude reads the hub and posts to it with the hub tool", async ($, on) => 
   await $.tool.call({ tool: 'CronCreate', cron: '*/10 * * * *', prompt: 'check the queue', recurring: true })
   await clock.settle()
 
-  const read = await $.tool.call({ tool: 'mcp__agent-map__hub', action: 'read' } as never)
+  const read = await $.tool.call({ tool: 'mcp__ringside__hub', action: 'read' } as never)
   const report = String((read as { result?: unknown }).result)
   expect(report).toContain('- api-fix: NEEDS THE PERSON, branch main')
   expect(report).toContain('Approve the plan')
   expect(report).toContain('Every 10 minutes')
   expect(report).toContain('prompt: check the queue')
 
-  const posted = await $.tool.call({ tool: 'mcp__agent-map__hub', action: 'post', text: 'I will take the API redeploy', to: 'api-fix' } as never)
+  const posted = await $.tool.call({ tool: 'mcp__ringside__hub', action: 'post', text: 'I will take the API redeploy', to: 'api-fix' } as never)
   expect(String((posted as { result?: unknown }).result)).toBe('Posted to api-fix.')
   const own = JSON.parse(files.get(`${DIR}/test-session.json`) ?? '{}') as HubFile
   expect(own.messages.map(x => [x.text, x.by, x.to])).toEqual([['I will take the API redeploy', 'claude', 'peer']])
-  const nobody = await $.tool.call({ tool: 'mcp__agent-map__hub', action: 'post', text: 'x', to: 'nobody' } as never)
+  const nobody = await $.tool.call({ tool: 'mcp__ringside__hub', action: 'post', text: 'x', to: 'nobody' } as never)
   expect(String((nobody as { result?: unknown }).result)).toBe('No session named "nobody" in this repo. Sessions here: api-fix.')
 })
 
@@ -793,7 +794,7 @@ test('with CLAUDE_CONFIG_DIR set, the registry and the board files live in that 
   expect(await ui.find({ key: 'need:session:alt-1' })).toBeDefined()
   expect(await ui.find({ key: 'need:session:default-dir' })).toBeUndefined()
   await ui.unmount()
-  const boards = [...files.keys()].filter(k => k.includes('/agent-map/hub/'))
+  const boards = [...files.keys()].filter(k => k.includes('/ringside/hub/'))
   expect(boards.length).toBeGreaterThan(0)
   expect(boards.every(k => k.startsWith('/Users/test/alt-claude/'))).toBe(true)
 })
@@ -892,7 +893,7 @@ test('the launcher lists agent files by where they come from, each card with its
   expect(await ui.find({ type: 'Text', text: 'PROJECT' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: '  sonnet' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: '  haiku' })).toBeDefined()
-  expect((await ui.findAll({ type: 'Text' })).some(t => t.props.color === '#87afd7' && String(t.props.children ?? t.text ?? '').includes('●'))).toBe(true)
+  expect((await ui.findAll({ type: 'Text' })).some(t => t.props.color === '#61afef' && String(t.props.children ?? t.text ?? '').includes('●'))).toBe(true)
   await ui.unmount()
 })
 

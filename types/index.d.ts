@@ -144,7 +144,7 @@ export type SessionRow = {
 
 export type HubState = 'working' | 'idle' | 'needs'
 
-// One Claude session working in this repository, as its own Agent Map publishes it.
+// One Claude session working in this repository, as its own Ringside publishes it.
 export type HubMember = {
   sessionId: string
   name: string
@@ -156,7 +156,7 @@ export type HubMember = {
   agents: number
   at: number
   isSelf: boolean
-  // Seen in the session list only: it does not run Agent Map, so it cannot read the board.
+  // Seen in the session list only: it does not run Ringside, so it cannot read the board.
   isBare: boolean
 }
 
@@ -186,7 +186,7 @@ export type Hub = {
 }
 
 
-// ---- Agent Map ----
+// ---- Ringside ----
 
 export type NodeStatus = 'running' | 'waiting' | 'stuck' | 'idle' | 'done' | 'failed'
 export type NodeKind = 'agent' | 'job' | 'loop' | 'workflow'
@@ -243,7 +243,7 @@ export type JumpNote = { sessionId: string; at: number; isOk: boolean; text: str
 
 declare module 'claude-code' {
   interface PluginState {
-    'agent-map': {
+    'ringside': {
       jobs: Job[]
       goal: Goal
       agents: AgentRow[]

@@ -1,0 +1,85 @@
+name: Bug report
+description: Something in Ringside does not work as it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for taking the time to report this. For a security problem, please do not use this form: follow [SECURITY.md](https://github.com/ChiFungHillmanChan/ringside/blob/main/SECURITY.md) instead.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What did you see? Paste the exact text Ringside showed, if any.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open two Claude Code sessions in Terminal
+        2. In one, ask Claude to run 3 Explore agents
+        3. In the other, press the first session's card
+        4. ...
+    validations:
+      required: true
+  - type: input
+    id: ringside
+    attributes:
+      label: Ringside version
+      description: The `version` in `.claude-plugin/plugin.json`, or what `claude plugin list` shows.
+      placeholder: "0.9.0"
+    validations:
+      required: true
+  - type: input
+    id: claude
+    attributes:
+      label: Claude Code version
+      description: Output of `claude --version`.
+      placeholder: "2.1.296"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "macOS 27.0, Ubuntu 24.04, Windows 11"
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where you run Claude Code
+      multiple: true
+      options:
+        - Terminal (macOS)
+        - iTerm2
+        - tmux
+        - another terminal (say which below)
+        - Claude Code desktop app
+        - VS Code or another editor
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and screenshots
+      description: |
+        Helpful extras: a screenshot of the pane, lines from `claude --debug` that mention `ringside`, or the output of `claude plugin validate .` in your Ringside folder. Remove anything private first.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you send
+      options:
+        - label: I restarted the session after installing or updating Ringside.
+          required: true
+        - label: I searched the open issues and this is not one of them.
+          required: true

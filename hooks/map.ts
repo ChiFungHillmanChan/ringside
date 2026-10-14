@@ -1,4 +1,4 @@
-// The Agent Map's model: every Claude session on this computer and what each one
+// Ringside's model: every Claude session on this computer and what each one
 // started, drawn from this session's own state, the other sessions' board files and
 // the session list (the engine's registry, or the sessions mod). Pure: no `$` here, so it is tested on its own.
 

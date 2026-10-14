@@ -178,9 +178,9 @@ export function catalogSections(entries: readonly CatalogEntry[]): CatalogSectio
 
 // Claude Code's agent colours as the terminal draws them.
 const AGENT_COLORS: Record<string, string> = {
-  red: '#d75f5f', blue: '#87afd7', green: '#87d787', yellow: '#d7d787', purple: '#af87d7', orange: '#d7875f', pink: '#d787af', cyan: '#87d7d7',
+  red: '#ef5f5f', blue: '#61afef', green: '#98c379', yellow: '#e5c07b', purple: '#c678dd', orange: '#f0904a', pink: '#f472b6', cyan: '#56b6c2',
 }
-const PALETTE = ['#87afd7', '#87d7d7', '#d7d787', '#d7875f', '#d7afd7', '#d75f5f', '#87d787', '#afafd7']
+const PALETTE = ['#61afef', '#56b6c2', '#e5c07b', '#f0904a', '#c678dd', '#ef5f5f', '#98c379', '#f472b6']
 
 // The dot a card leads with: the colour the agent file names, else one kept for its name.
 export function dotColor(entry: CatalogEntry): string {
@@ -188,7 +188,7 @@ export function dotColor(entry: CatalogEntry): string {
   if (named !== undefined) return named
   let n = 0
   for (const ch of entry.name) n = (n * 31 + (ch.codePointAt(0) ?? 0)) >>> 0
-  return PALETTE[n % PALETTE.length] ?? '#87afd7'
+  return PALETTE[n % PALETTE.length] ?? '#61afef'
 }
 
 // What the launcher lists for a query: names that start with it first, then the rest that contain it.

@@ -129,10 +129,10 @@ test('the launcher lists skills, not built-in commands or its own, and filters b
   const skills = skillsFrom([
     { name: 'ship-it', description: 'Ship it.', source: 'user' },
     { name: 'superpowers:brainstorming', description: 'Explore intent.', source: 'plugin', plugin: 'superpowers' },
-    { name: 'agent-map', description: 'This pane.', source: 'plugin', plugin: 'agent-map' },
+    { name: 'ringside', description: 'This pane.', source: 'plugin', plugin: 'ringside' },
     { name: 'clear', description: 'Clear the chat.', source: 'builtin' },
     { name: 'simplify', description: 'Simplify the diff.', source: 'builtin' },
-  ], 'agent-map')
+  ], 'ringside')
   expect(skills.map(s => s.name)).toEqual(['ship-it', 'superpowers:brainstorming', 'simplify'])
   const list: CatalogEntry[] = [
     ...skills,
@@ -173,7 +173,7 @@ test('an agent file names its model and colour; the launcher groups types by whe
   // The engine's offer carries neither: what the file said stays.
   const merged = mergeOffer([file as CatalogEntry], { agent: 'perf-profiler', description: 'Looks for the slow parts.', source: 'projectSettings' })
   expect(merged[0]?.model).toBe('sonnet')
-  expect(dotColor(file as CatalogEntry)).toBe('#d7875f')
+  expect(dotColor(file as CatalogEntry)).toBe('#f0904a')
   expect(dotColor({ kind: 'agent', name: 'x', description: '', source: 'u' })).toMatch(/^#[0-9a-f]{6}$/)
   const list: CatalogEntry[] = [
     { kind: 'agent', name: 'Explore', description: '', source: 'built-in' },

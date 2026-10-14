@@ -27,7 +27,7 @@ export type HubFile = {
   // The newest message it has read, so a reload does not hand the model old ones again.
   seenAt: number
   messages: HubMessage[]
-  // For the Agent Map: why it may be stuck ('' when fine) and what it started. Absent in older files.
+  // For Ringside: why it may be stuck ('' when fine) and what it started. Absent in older files.
   stuck?: string
   nodes?: MapNode[]
 }
@@ -46,7 +46,7 @@ export function repoSlug(root: string): string {
 
 // `claudeDir` is Claude's own folder (CLAUDE_CONFIG_DIR, else ~/.claude).
 export function hubDir(claudeDir: string, root: string): string {
-  return `${claudeDir}/mods-data/agent-map/hub/${repoSlug(root)}`
+  return `${claudeDir}/mods-data/ringside/hub/${repoSlug(root)}`
 }
 
 function asMessage(v: unknown): HubMessage | null {
@@ -110,7 +110,7 @@ export function readHub(files: readonly HubFile[], selfId: string, now: number):
 
 type RowLike = { sessionId: string; name: string; cwd: string; group: string; summary: string; state: string; since: number; isSelf: boolean }
 
-// Sessions in this repo the session list sees but whose Agent Map is not on the board.
+// Sessions in this repo the session list sees but that do not run Ringside, so are not on the board.
 export function bareMembers(rows: readonly RowLike[], root: string, onBoard: ReadonlySet<string>): HubMember[] {
   if (root === '') return []
   return rows
@@ -130,9 +130,9 @@ export function unread(messages: readonly HubMessage[], selfId: string, seenAt: 
 export function hubNote(messages: readonly HubMessage[], label: string): string {
   const lines = messages.map(m => `- ${m.fromName}${m.by === 'claude' ? ' (Claude)' : ' (the person)'}: ${m.text}`)
   return [
-    `Repo hub (Agent Map, ${label}): new notes on the shared board from other sessions working in this same repository.`,
+    `Repo hub (Ringside, ${label}): new notes on the shared board from other sessions working in this same repository.`,
     ...lines,
-    'Take them into account; answer on the board with the mcp__agent-map__hub tool (action "post") when a reply is useful.',
+    'Take them into account; answer on the board with the mcp__ringside__hub tool (action "post") when a reply is useful.',
   ].join('\n')
 }
 
@@ -173,7 +173,7 @@ export function hubReport(input: {
       m.branch === '' ? '' : `branch ${m.branch}`,
       m.loops > 0 ? `${m.loops} loop${m.loops === 1 ? '' : 's'}${m.nextLoopAt === null ? '' : ` (next ${clock(m.nextLoopAt)})`}` : '',
       m.agents > 0 ? `${m.agents} subagent${m.agents === 1 ? '' : 's'} running` : '',
-      m.isBare ? 'no Agent Map (cannot read the board)' : `seen ${Math.max(0, Math.round((input.now - m.at) / 1000))}s ago`,
+      m.isBare ? 'does not run Ringside (cannot read the board)' : `seen ${Math.max(0, Math.round((input.now - m.at) / 1000))}s ago`,
     ].filter(b => b !== '')
     lines.push(`- ${m.name}${m.isSelf ? ' (this session)' : ''}: ${bits.join(', ')}${m.doing === '' ? '' : ` — ${m.doing}`}`)
   }

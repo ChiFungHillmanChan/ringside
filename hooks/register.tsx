@@ -10,7 +10,7 @@ import {
 } from './agents'
 import { asHubFile, bareMembers, HUB_STALE_MS, hubDir, hubNote, hubReport, newMessage, NODES_MAX, pushOutbox, readHub, resolveRecipient, unread } from './hub'
 import type { HubFile } from './hub'
-import { adaptHidden, adaptSessionRows, FOCUS_ITERM, FOCUS_TERMINAL, OPEN_TERMINAL, parsePs, rowsFromRegistry, shellQuote, tmuxPaneOn } from './fleet'
+import { adaptHidden, adaptSessionRows, FOCUS_ITERM, FOCUS_TERMINAL, OPEN_TERMINAL, parsePs, rowsFromRegistry, shellQuote, TMUX_PANES, tmuxPaneOn } from './fleet'
 import { activeLoops, addCron, addWakeup, endLoop, fired, pruneLoops, reconcile } from './loops'
 import {
   adaptFlightAgents, adaptFlightLoops, adaptSavvy, autoZoom, buildMap, cellWidth, dur, fit, graphSvg, needsOf, plainStep, selfNodes, span, stateWord, stuckReason, wrap,
@@ -487,7 +487,12 @@ async function runQuiet($: EngineInterface, argv: readonly string[], timeoutMs =
   }
 }
 
+let hasOsa: boolean | undefined
+
+// AppleScript, on macOS; 'none' elsewhere, so tmux's answer stands.
 async function osa($: EngineInterface, lines: readonly string[], args: readonly string[]): Promise<string> {
+  hasOsa ??= await $.fs.exists('/usr/bin/osascript').catch(() => false)
+  if (!hasOsa) return 'none'
   const r = await runQuiet($, ['/usr/bin/osascript', ...lines.flatMap(l => ['-e', l]), ...args], 15_000)
   return r.code === 0 ? r.out.trim() : `error: ${oneLine(r.err)}`
 }
@@ -522,15 +527,17 @@ async function focusTty($: EngineInterface, tty: string): Promise<string> {
 async function focusTmux($: EngineInterface, tty: string): Promise<string> {
   const tmux = await findTmux($)
   if (tmux === null) return 'none'
-  const panes = await runQuiet($, [tmux, 'list-panes', '-a', '-F', '#{pane_tty} #{session_name} #{window_id} #{pane_id}'])
+  const panes = await runQuiet($, [tmux, 'list-panes', '-a', '-F', TMUX_PANES])
   const hit = panes.code === 0 ? tmuxPaneOn(panes.out, tty) : null
   if (hit === null) return 'none'
-  await runQuiet($, [tmux, 'select-window', '-t', hit.windowId])
-  await runQuiet($, [tmux, 'select-pane', '-t', hit.paneId])
+  const isShown = (await runQuiet($, [tmux, 'select-window', '-t', hit.windowId])).code === 0 &&
+    (await runQuiet($, [tmux, 'select-pane', '-t', hit.paneId])).code === 0
   const clients = await runQuiet($, [tmux, 'list-clients', '-t', hit.session, '-F', '#{client_tty}'])
   const clientTty = clients.out.split('\n')[0]?.trim() ?? ''
   if (clientTty === '') return osa($, OPEN_TERMINAL, [`${tmux} attach -t ${shellQuote(hit.session)}`])
-  return focusTty($, clientTty)
+  const raised = await focusTty($, clientTty)
+  // Shown in its tmux window even where no terminal app can be brought forward (Linux, other terminals).
+  return raised === 'ok' ? 'ok' : isShown ? 'tmux' : raised
 }
 
 // Brings another session's terminal forward: Terminal or iTerm2 by its tty, a tmux pane, or
@@ -545,12 +552,12 @@ async function jumpTo($: EngineInterface, sessionId: string): Promise<void> {
   await update($, viewAtom, v => ({ ...v, jump: { sessionId, at: 0, isOk: true, text: 'Bringing it forward…' } }))
   let result = 'none'
   if (row !== undefined && row.jobId !== null) {
-    result = await osa($, OPEN_TERMINAL, [`claude attach ${row.jobId}`])
+    result = await osa($, OPEN_TERMINAL, [`claude attach ${shellQuote(row.jobId)}`])
   } else if (row !== undefined && row.tty !== null) {
     result = await focusTty($, row.tty)
     if (result !== 'ok') {
       const viaTmux = await focusTmux($, row.tty)
-      if (viaTmux === 'ok' || result === 'none') result = viaTmux
+      if (viaTmux === 'ok' || viaTmux === 'tmux' || result === 'none') result = viaTmux
     }
   }
   const at = await $.clock.now()
@@ -558,10 +565,13 @@ async function jumpTo($: EngineInterface, sessionId: string): Promise<void> {
   const why = result.startsWith('error:') ? `: ${fit(result.slice(7), 160)}`
     : row === undefined ? ': it is no longer in the session list'
       : row.jobId === null && row.tty === null ? ': no terminal is known for it'
-        : ': its terminal window was not found (Terminal, iTerm2 and tmux were checked)'
+        : row.jobId !== null && hasOsa === false ? ': opening a new terminal window works on macOS only'
+          : ': its terminal window was not found (Terminal, iTerm2 and tmux were checked)'
   const note: JumpNote = result === 'ok'
     ? { sessionId, at, isOk: true, text: row?.jobId != null ? `Opened ${name} in a new Terminal window` : `Switched to ${name}'s terminal (${(row?.tty ?? '').replace('/dev/', '')})` }
-    : { sessionId, at, isOk: false, text: `Could not bring ${name} forward${why}` }
+    : result === 'tmux'
+      ? { sessionId, at, isOk: true, text: `Showed ${name}'s pane in its tmux window` }
+      : { sessionId, at, isOk: false, text: `Could not bring ${name} forward${why}` }
   await update($, viewAtom, v => ({ ...v, jump: note }))
   if (!note.isOk) await notify($, note.text, { width: 160, timeoutMs: 8_000 })
 }
@@ -684,9 +694,10 @@ async function refreshWaiting($: EngineInterface, now: number): Promise<void> {
 async function refreshRepo($: EngineInterface, cwd: string): Promise<void> {
   let root = cwd
   let branch = ''
-  const ran = await $.process.run(['git', '-C', cwd, 'rev-parse', '--show-toplevel', '--abbrev-ref', 'HEAD']).catch(() => undefined)
-  if (ran !== undefined && ran.exitCode === 0) {
-    const [top = '', head = ''] = ran.stdout.trim().split('\n')
+  // Bounded: the first run is part of the session's start, which the first prompt waits on.
+  const ran = await runQuiet($, ['git', '-C', cwd, 'rev-parse', '--show-toplevel', '--abbrev-ref', 'HEAD'], 3_000)
+  if (ran.code === 0) {
+    const [top = '', head = ''] = ran.out.trim().split('\n')
     if (top !== '') root = top
     branch = head === 'HEAD' ? 'detached' : head
   }
@@ -1110,6 +1121,8 @@ const STATUS_WORD: Record<string, string> = { running: 'working', waiting: 'wait
 const STUCK_COLOR = '#ff8700'
 // Replay Theater is loaded: a session's Peek offers its /replay.
 let hasReplay = false
+// Set at session start: the pane opens itself once a drawing says the transcript is fullscreen.
+let opensUnasked = false
 let bandCache: { at: number; items: MapNeed[] } = { at: 0, items: [] }
 
 export const register: Register = on => {
@@ -1123,6 +1136,8 @@ export const register: Register = on => {
     await update($, agents, l => l.filter(a => typeof a.startedAt === 'number' && a.endedAt !== undefined))
     await update($, launchAtom, l => ({ ...NO_LAUNCH, ...l, note: '' }))
     offerSeen = new Set()
+    hasOsa = undefined
+    tmuxBin = undefined
     await $.command.register({
       name: 'ringside',
       description: 'Ringside: every Claude session on this computer and what each started, what needs you, tasks, launcher',
@@ -1133,7 +1148,7 @@ export const register: Register = on => {
     } catch {
       // A host with no tools (a test, an SDK run that refuses it): the pane still works.
     }
-    if (e.isInteractive) void $.ui.open({ id: PANE, title: TITLE })
+    opensUnasked = e.isInteractive
 
     const now = await $.clock.now()
     toastedAt = now
@@ -2028,7 +2043,7 @@ export const register: Register = on => {
             <Box gap={1}>
               <Text>{' '}</Text>
               {c.kind === 'skill' && <Button key="launch-run" plain label="[run now]" onPress={() => runSkill($, c.name, '')} />}
-              <Button key="launch-fill" plain label="[to prompt]" onPress={() => $.prompt.fill({ text: c.kind === 'skill' ? `/${c.name} ` : `Use the ${c.name} agent to ` }).then(unpick)} />
+              <Button key="launch-fill" plain label="[to prompt]" onPress={() => $.prompt.fill({ text: c.kind === 'skill' ? `/${c.name} ` : `Use the ${c.name} agent to `, mode: 'insert' }).then(unpick)} />
             </Box>
           )}
         </Box>
@@ -2105,6 +2120,13 @@ export const register: Register = on => {
   // session waiting on them, or anything that may be stuck. With the sessions mod loaded, its own band
   // already says who waits, so this one keeps to what may be stuck.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    // Unasked, the pane opens only beside a fullscreen transcript: on the main
+    // screen (tmux's default) it would sit above the prompt, so it waits for /ringside.
+    const isFullscreen = e.viewport?.isFullscreen
+    if (opensUnasked && isFullscreen !== undefined) {
+      opensUnasked = false
+      if (isFullscreen) void $.ui.open({ id: PANE, title: TITLE }).catch(() => undefined)
+    }
     if (e.props.hasSurvey || (await read($, isShown))) return next(e)
     const now = await $.clock.now()
     // The band draws often; the map behind it is worked out at most once a second.

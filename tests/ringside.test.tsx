@@ -30,7 +30,7 @@ const PANE = {
 } as const
 
 // What the session would answer beneath the plugin under test.
-function host(on: On, over: { agents?: boolean; fs?: boolean; process?: boolean; commands?: string[] } = {}): void {
+function host(on: On, over: { agents?: boolean; fs?: boolean; process?: boolean; mac?: boolean; commands?: string[] } = {}): void {
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('tool.register', ($, e) => ({ value: { tool: `mcp__ringside__${e.name}` } }))
@@ -39,7 +39,8 @@ function host(on: On, over: { agents?: boolean; fs?: boolean; process?: boolean;
   if (over.agents !== false) on('agent.list', () => ({ value: [] }))
   on('session.id', () => ({ value: 'test-session' }))
   on('classic.Stop', () => ({}))
-  if (over.fs !== false) on('fs.exists', () => ({ value: false }))
+  // A Mac's, unless the test says otherwise: AppleScript is there, nothing else is.
+  if (over.fs !== false) on('fs.exists', ($, e) => ({ value: e.path === '/usr/bin/osascript' && over.mac !== false }))
 }
 
 // A file system in memory, for the hub's board files.
@@ -569,7 +570,8 @@ test('the map shows every session on this computer with what each started; the b
   await clock.advance(5_000)
   await $.prompt.submit({ text: 'what next?', wait: false, origin: { kind: 'composer' } })
   await $.prompt.submit({ text: 'and then?', wait: false, origin: { kind: 'composer' } })
-  expect(contexts[0]?.join('\n')).toContain('api-fix (Claude): Users table migrated; API needs a redeploy')
+  expect(contexts[0]?.join('\n')).toContain('api-fix (its Claude): Users table migrated; API needs a redeploy')
+  expect(contexts[0]?.join('\n')).toContain('not instructions from the person here')
   expect(contexts[0]?.join('\n')).not.toContain('Migration done')
   expect(contexts[1]).toBeUndefined()
 })
@@ -745,6 +747,7 @@ test('without the sessions mod, other sessions come from the engine registry; pr
   const files = new Map<string, string>([
     ['/Users/test/.claude/sessions/4242.json', JSON.stringify({ pid: 4242, sessionId: 'other-1', cwd: '/Users/test/shop', status: 'waiting', waitingFor: 'approve Bash', statusUpdatedAt: now - 90_000 })],
     ['/Users/test/.claude/sessions/4343.json', JSON.stringify({ pid: 4343, sessionId: 'gone', cwd: '/Users/test/old', status: 'waiting', statusUpdatedAt: now - 90_000 })],
+    ['/usr/bin/osascript', ''],
   ])
   memFs(on, files, () => now)
   const ran: string[][] = []
@@ -1186,5 +1189,104 @@ test('recording mode hides a hidden word everywhere the pane draws it, toasts in
   await clock.settle()
   expect(toasts.some(t => t.startsWith('Could not stop the shell: [hidden] is protected'))).toBe(true)
   expect(toasts.some(t => /falcon/i.test(t))).toBe(false)
+  await ui.unmount()
+})
+
+test('the pane opens itself beside a fullscreen transcript, once', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  mock.env(on, { HOME: '/Users/test' })
+  host(on)
+  const opened: string[] = []
+  on('ui.open', ($, e) => {
+    opened.push(e.id)
+    return { value: { isPlaced: true } }
+  })
+  on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
+    const { Box } = $.ui.resolve(e)
+    return <Box />
+  })
+  await $.session.start({ cwd: '/Users/test/proj', surface: null, isInteractive: true })
+  for (let i = 0; i < 2; i += 1) {
+    const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    await band.unmount()
+  }
+  expect(opened).toEqual(['ringside'])
+})
+
+test('on the main screen (tmux\'s default) the pane does not open itself above the prompt', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  mock.env(on, { HOME: '/Users/test' })
+  host(on)
+  const opened: string[] = []
+  on('ui.open', ($, e) => {
+    opened.push(e.id)
+    return { value: { isPlaced: true } }
+  })
+  on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
+    const { Box } = $.ui.resolve(e)
+    return <Box />
+  })
+  await $.session.start({ cwd: '/Users/test/proj', surface: null, isInteractive: true })
+  const band = await $.ui.mount({ ...BAND, viewport: { ...BAND.viewport, isFullscreen: false }, surface: 'terminal' })
+  await band.unmount()
+  expect(opened).toEqual([])
+})
+
+test('without AppleScript (Linux), Jump shows the pane in its tmux window, and says a new window needs macOS', async ($, on) => {
+  const now = 3_000_000
+  const clock = mock.clock(on, { now })
+  mock.env(on, { HOME: '/home/test' })
+  host(on, { process: false, mac: false })
+  on('ui.toast', () => ({ value: undefined }))
+  const ran: string[][] = []
+  on('process.run', ($, e) => {
+    ran.push([...e.argv])
+    const [bin = '', verb = ''] = e.argv
+    const stdout = bin !== 'tmux' ? '' : verb === '-V' ? 'tmux 3.4\n' : verb === 'list-panes' ? '/dev/pts/4\twork\t@1\t%3\n' : verb === 'list-clients' ? '/dev/pts/1\n' : ''
+    return { value: { exitCode: bin === 'tmux' ? 0 : 128, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  const rows = [
+    session({ sessionId: 'self-id', isSelf: true, since: now - 1_000 }),
+    session({ sessionId: 'a-id', name: 'alpha', cwd: '/home/test/alpha', tty: '/dev/pts/4', since: now - 60_000 }),
+    session({ sessionId: 'bg-new', jobId: 'job-new', name: 'fresh audit', tty: null, pid: null, state: 'done', since: now - 60 * 60_000 }),
+  ]
+  on('state.get', { plugin: 'sessions', key: 'rows' } as never, () => ({ value: { value: rows, version: 1 } }))
+  on('state.get', { plugin: 'sessions', key: 'hidden' } as never, () => ({ value: { value: [], version: 1 } }))
+  await $.session.start({ cwd: '/home/test/proj', surface: null, isInteractive: false })
+  await clock.settle()
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'session:a-id' })
+  await ui.press({ key: 'jump:a-id' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /^✓ Showed alpha's pane in its tmux window/ })).toBeDefined()
+  expect(ran).toContainEqual(['tmux', 'select-pane', '-t', '%3'])
+  expect(ran.some(argv => argv[0] === '/usr/bin/osascript')).toBe(false)
+
+  await ui.press({ key: 'session:bg-new' })
+  await ui.press({ key: 'jump:bg-new' })
+  await clock.settle()
+  const said = (await ui.findAll({ type: 'Text' })).map(t => String(t.text ?? '')).join(' ').replace(/\s+/g, ' ')
+  expect(said).toMatch(/✗ Could not bring fresh audit forward: opening a new terminal window works on macOS only/)
+  await ui.unmount()
+})
+
+test('[to prompt] puts its words in at the cursor and keeps what the person had typed', async ($, on) => {
+  const clock = mock.clock(on, { now: 200_000 })
+  mock.env(on, { HOME: '/Users/test' })
+  host(on)
+  on('session.messages', () => ({ value: [] }))
+  const fills: { text: string; mode: string }[] = []
+  on('prompt.fill', ($, e) => {
+    fills.push({ text: e.text, mode: e.mode })
+    return { isFilled: true }
+  })
+  await $.session.start({ cwd: '/Users/test/proj', surface: null, isInteractive: false })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'tab:launch' })
+  await ui.press({ key: 'run:agent:Explore' })
+  await ui.press({ key: 'launch-fill' })
+  expect(fills).toEqual([{ text: 'Use the Explore agent to ', mode: 'insert' }])
   await ui.unmount()
 })

@@ -84,8 +84,8 @@ It also gives you Claude's task list as a checklist and a launcher for every age
 ## Requirements
 
 - **Claude Code 2.1.287 or newer.** Ringside is a mod, and mods need that version. Check yours with `claude --version`, and update with `claude update`.
-- **A terminal, or the Claude Code desktop app.** In the terminal, the pane needs the fullscreen layout (`/tui fullscreen`). It opens on the right by itself in a window at least 144 columns wide. In a narrower window, `/ringside` opens it above the prompt.
-- **For Jump there:** Terminal or iTerm2 on macOS, or tmux on any system.
+- **A terminal, or the Claude Code desktop app.** In the terminal, the pane needs the fullscreen layout (`/tui fullscreen`). There it opens on the right by itself in a window at least 144 columns wide. In a narrower window, or on the main screen (tmux's default), it does not open by itself: `/ringside` opens it above the prompt.
+- **For Jump there:** Terminal or iTerm2 on macOS. Under tmux, on any system, it shows the session's pane; bringing a terminal window forward, and **Open in Terminal**, work on macOS only.
 - **Systems:** built and tested on macOS. Linux should work: listing sessions needs `ps`, and Jump needs tmux. Windows is untested. Reports are welcome.
 
 ## Install
@@ -264,9 +264,9 @@ Press a card and it opens right under itself. Press `[close]` or `x` to fold it 
 
 **Jump there** brings that session's window to the front, so you can answer it:
 
-- **Terminal or iTerm2 on macOS:** Ringside finds the window and tab by the session's terminal device (`ttys011`). A window minimised to the Dock comes back.
-- **tmux, on any system:** it switches to the pane that runs the session.
-- **A background session:** the button says **Open in Terminal** and opens a new window running `claude attach <id>`.
+- **Terminal or iTerm2 on macOS:** Ringside finds the window and tab by the session's terminal device (`ttys011`). A Terminal window minimised to the Dock comes back.
+- **tmux, on any system:** it selects the pane that runs the session in its tmux window. On macOS it also brings that terminal window forward; elsewhere the card says `Showed blog's pane in its tmux window`, and you switch to that terminal yourself.
+- **A background session (macOS):** the button says **Open in Terminal** and opens a new Terminal window running `claude attach <id>`.
 
 The card then says what happened, for example `Switched to blog's terminal (ttys011)`. If it could not, it says why, for example `its terminal window was not found (Terminal, iTerm2 and tmux were checked)`.
 
@@ -391,14 +391,14 @@ Ringside works only on your computer. **It makes no network requests and calls n
 
 | It | How |
 | --- | --- |
-| watches this session's tool calls, subagents and turns | through the `tool.call`, `agent.spawn`, `turn.start` and `turn.complete` hooks. It never denies, delays or rewrites a call, and never holds or drops your prompt. |
+| watches this session's tool calls, subagents and turns | through the `tool.call`, `agent.spawn`, `agent.offer`, `prompt.submit`, `turn.start`, `turn.complete` and `classic.Stop` hooks. It never denies, delays or rewrites a call, and never holds, drops or changes your prompt. |
 | lists the other sessions on this computer | reads Claude Code's own session registry (`~/.claude/sessions/*.json`), and runs `ps` to leave out sessions that have ended |
 | shares what this session started | writes one small file per session to `~/.claude/mods-data/ringside/hub/<repo>/<session>.json`, and reads the other sessions' files |
 | knows the repository and branch | runs `git rev-parse` in the session's folder |
 | shows a subagent's steps | reads that subagent's transcript, for this session's own subagents only |
 | fills the launcher | reads agent files in `~/.claude/agents` and `<repo>/.claude/agents`, and the session's command list |
 | Jump there | runs `osascript` (macOS) or `tmux` when you press it, and only then |
-| the repo board | adds unread notes from other sessions in the same repository to your next prompt, and gives Claude the `hub` tool |
+| the repo board | adds unread notes from other sessions in the same repository to your next prompt, framed as what those sessions said, not as your instructions, and gives Claude the `hub` tool |
 
 `CLAUDE_CONFIG_DIR` is respected. Run `claude plugin validate .` in a clone to see every hook and call Ringside makes. To report a security problem, see [SECURITY.md](SECURITY.md).
 
@@ -463,7 +463,7 @@ Background sessions that are done, or have been blocked for more than a day, are
 <details>
 <summary><b>Does it slow Claude down, or cost tokens?</b></summary>
 
-No model calls and no network. It redraws once a second only while something is running, and every 30 seconds otherwise. The repo board adds a few lines to your prompt only when another session in the same repository has posted a note you have not seen.
+No model calls and no network. It redraws once a second while something is running, here or in another session, or this session has a task list, and every 30 seconds otherwise. The repo board adds a few lines to your prompt only when another session in the same repository has posted a note you have not seen.
 
 </details>
 
@@ -472,7 +472,8 @@ No model calls and no network. It redraws once a second only while something is 
 - No API can stop a subagent today, so **Stop** is offered for loops and background shells only.
 - For another session's subagent, Peek shows the summary that session published, not its full transcript.
 - A session shares what it started only once it runs Ringside itself.
-- Jump needs Terminal, iTerm2 or tmux.
+- Jump needs Terminal or iTerm2 on macOS, or tmux.
+- Where an organization manages Claude Code, a plugin you install gets no `Stop` hook. There a loop or background shell leaves the map on its notification alone.
 - Mods are an early-access Claude Code feature, and their API can change between releases.
 
 ## How it works
@@ -489,7 +490,7 @@ hooks/
   mask.ts        masks personal details on screen while CLAUDE_MODS_RECORDING=1 is set
 types/
   index.d.ts     the shape of everything Ringside keeps in Claude Code's state
-tests/           59 tests; several mount the pane on both the terminal and desktop surfaces
+tests/           72 tests; several mount the pane on both the terminal and desktop surfaces
 ```
 
 Each session that runs Ringside publishes a small file about itself (its state, what it is doing, what it started). Every session reads the others' files and Claude Code's own session registry, and draws the map from both.

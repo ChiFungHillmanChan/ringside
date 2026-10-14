@@ -163,9 +163,12 @@ export const OPEN_TERMINAL = [
   'end run',
 ]
 
-// The tmux pane on a terminal device, from `tmux list-panes -a -F '#{pane_tty} #{session_name} #{window_id} #{pane_id}'`.
+// The tmux pane on a terminal device, from `tmux list-panes -a -F` with TMUX_PANES:
+// tab-separated, as a session's name may hold spaces.
+export const TMUX_PANES = '#{pane_tty}\t#{session_name}\t#{window_id}\t#{pane_id}'
+
 export function tmuxPaneOn(listPanes: string, tty: string): { session: string; windowId: string; paneId: string } | null {
-  const hit = listPanes.split('\n').map(l => l.trim().split(' ')).find(p => p[0] === tty)
+  const hit = listPanes.split('\n').map(l => l.trim().split('\t')).find(p => p[0] === tty)
   if (hit === undefined) return null
   const [, session = '', windowId = '', paneId = ''] = hit
   return session === '' || windowId === '' || paneId === '' ? null : { session, windowId, paneId }

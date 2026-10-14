@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import {
-  applyTaskCall, cellWidth, describeCall, elsewhereNeeds, groupNow, lastQuestion, mergeAgents, needOf, peekOf, presenceOf, trimJobs,
+  applyTaskCall, cellWidth, describeCall, elsewhereNeeds, endGoneShells, groupNow, isStale, lastQuestion, mergeAgents, needOf, peekOf, presenceOf, stopOutcomeOf, trimJobs,
 } from '../hooks/register'
 import type { HubFile } from '../hooks/hub'
 import type { AgentRow, HubMessage, Job, MainState } from '../types'
@@ -30,7 +30,7 @@ const PANE = {
 } as const
 
 // What the session would answer beneath the plugin under test.
-function host(on: On, over: { agents?: boolean; fs?: boolean; process?: boolean; commands?: string[] } = {}): void {
+function host(on: On, over: { agents?: boolean; fs?: boolean; process?: boolean; mac?: boolean; commands?: string[] } = {}): void {
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('tool.register', ($, e) => ({ value: { tool: `mcp__ringside__${e.name}` } }))
@@ -39,7 +39,8 @@ function host(on: On, over: { agents?: boolean; fs?: boolean; process?: boolean;
   if (over.agents !== false) on('agent.list', () => ({ value: [] }))
   on('session.id', () => ({ value: 'test-session' }))
   on('classic.Stop', () => ({}))
-  if (over.fs !== false) on('fs.exists', () => ({ value: false }))
+  // A Mac's, unless the test says otherwise: AppleScript is there, nothing else is.
+  if (over.fs !== false) on('fs.exists', ($, e) => ({ value: e.path === '/usr/bin/osascript' && over.mac !== false }))
 }
 
 // A file system in memory, for the hub's board files.
@@ -361,6 +362,7 @@ test('a loop is a node of this session: opened, how often, since when, its next 
   expect(deleted).toEqual([])
   expect(String((await ui.find({ key: 'loop-stop:c1' }))?.props.label)).toBe('Press again to stop')
   await ui.press({ key: 'loop-stop:c1' })
+  await clock.settle()
   expect(deleted).toEqual(['c1'])
   expect(await ui.find({ key: 'node:self:loop:c1' })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: 'That one has ended or left the map.' })).toBeDefined()
@@ -568,7 +570,8 @@ test('the map shows every session on this computer with what each started; the b
   await clock.advance(5_000)
   await $.prompt.submit({ text: 'what next?', wait: false, origin: { kind: 'composer' } })
   await $.prompt.submit({ text: 'and then?', wait: false, origin: { kind: 'composer' } })
-  expect(contexts[0]?.join('\n')).toContain('api-fix (Claude): Users table migrated; API needs a redeploy')
+  expect(contexts[0]?.join('\n')).toContain('api-fix (its Claude): Users table migrated; API needs a redeploy')
+  expect(contexts[0]?.join('\n')).toContain('not instructions from the person here')
   expect(contexts[0]?.join('\n')).not.toContain('Migration done')
   expect(contexts[1]).toBeUndefined()
 })
@@ -633,13 +636,13 @@ test('the same call failing three times may be stuck: under NEEDS YOU, and in th
   await clock.settle()
 
   const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(String((await pane.find({ key: 'need:session:test-session' }))?.props.label)).toMatch(/^this session: the same Bash failed 3 +0:00$/)
+  expect(String((await pane.find({ key: 'need:session:test-session' }))?.props.label)).toMatch(/^this session: the same command failed 3 +0:00$/)
   // What does not fit goes on a second line, never cut.
   expect(await pane.find({ type: 'Text', text: '  times in a row: pnpm install' })).toBeDefined()
   await pane.unmount()
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect(await band.find({ type: 'Text', text: 'May be stuck' })).toBeDefined()
-  expect(await band.find({ type: 'Text', text: /^this session: the same Bash failed 3 times/ })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /^this session: the same command failed 3 times/ })).toBeDefined()
   expect(await band.find({ key: 'map-open' })).toBeDefined()
   await band.unmount()
 })
@@ -744,6 +747,7 @@ test('without the sessions mod, other sessions come from the engine registry; pr
   const files = new Map<string, string>([
     ['/Users/test/.claude/sessions/4242.json', JSON.stringify({ pid: 4242, sessionId: 'other-1', cwd: '/Users/test/shop', status: 'waiting', waitingFor: 'approve Bash', statusUpdatedAt: now - 90_000 })],
     ['/Users/test/.claude/sessions/4343.json', JSON.stringify({ pid: 4343, sessionId: 'gone', cwd: '/Users/test/old', status: 'waiting', statusUpdatedAt: now - 90_000 })],
+    ['/usr/bin/osascript', ''],
   ])
   memFs(on, files, () => now)
   const ran: string[][] = []
@@ -948,5 +952,618 @@ test('a session opens right under its own row, says how it is reached, and what 
   // A background session opens with claude attach instead.
   await ui.press({ key: 'session:bg-new' })
   expect(String((await ui.find({ key: 'jump:bg-new' }))?.props.label)).toBe('Open in Terminal')
+  await ui.unmount()
+})
+
+// A background shell as the Bash tool answers one: its task id, nothing waited for.
+const BACKGROUND = { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'b1' }
+
+async function shellKey(ui: { findAll: (q: { type: string }) => Promise<{ key: unknown }[]> }): Promise<string | undefined> {
+  const found = (await ui.findAll({ type: 'Button' })).find(b => String(b.key).startsWith('node:self:job:'))
+  return found === undefined ? undefined : String(found.key)
+}
+
+test('recording mode masks the desktop drawing too', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  mock.env(on, { HOME: '/Users/test', CLAUDE_MODS_RECORDING: '1', CLAUDE_MODS_RECORDING_TERMS: JSON.stringify(['falcon']) })
+  host(on)
+  on('tool.call', { tool: 'Bash' }, () => ({ result: BACKGROUND }))
+  await $.session.start({ cwd: '/Users/test/falcon-site', surface: null, isInteractive: false })
+  await $.tool.call({ tool: 'Bash', command: 'npm run dev', description: 'Serve falcon', run_in_background: true })
+  await clock.settle()
+  const desk = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const source = String((await desk.find({ type: 'Svg' }))?.props.source)
+  expect(source).toContain('[hidden]')
+  expect(source).not.toMatch(/falcon/i)
+  await desk.unmount()
+})
+
+test('a stop the engine refuses leaves the loop and the shell on the map, and says so', async ($, on) => {
+  const clock = mock.clock(on, { now: at(14, 2, 30) })
+  mock.env(on, { HOME: '/Users/test' })
+  host(on)
+  const toasts: string[] = []
+  on('ui.toast', ($, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  on('tool.call', { tool: 'CronCreate' }, () => ({ result: { id: 'c1', humanSchedule: 'Every 5 minutes', recurring: true, durable: false } }))
+  on('tool.call', { tool: 'CronDelete' }, () => ({ deny: 'The user declined' }))
+  on('tool.call', { tool: 'Bash' }, () => ({ result: BACKGROUND }))
+  on('tool.call', { tool: 'TaskStop' }, () => ({ deny: 'The user declined' }))
+  await $.session.start({ cwd: '/Users/test/proj', surface: null, isInteractive: false })
+  await $.tool.call({ tool: 'CronCreate', cron: '*/5 * * * *', prompt: '/babysit-prs', recurring: true })
+  await $.tool.call({ tool: 'Bash', command: 'npm run dev', description: 'Start the dev server', run_in_background: true })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'node:self:loop:c1' })
+  await ui.press({ key: 'loop-stop:c1' })
+  await ui.press({ key: 'loop-stop:c1' })
+  await clock.settle()
+  expect(await ui.find({ key: 'node:self:loop:c1' })).toBeDefined()
+  expect(toasts.some(t => /^Could not stop the loop: The user declined/.test(t))).toBe(true)
+  await ui.press({ key: 'peek-close' })
+
+  const key = await shellKey(ui)
+  expect(key).toBeDefined()
+  await ui.press({ key: String(key) })
+  const stopKey = `job-stop:${String(key).replace(/^node:self:/, '')}`
+  await ui.press({ key: stopKey })
+  await ui.press({ key: stopKey })
+  await clock.settle()
+  expect(await shellKey(ui)).toBe(key)
+  expect(toasts.some(t => /^Could not stop the shell: The user declined/.test(t))).toBe(true)
+  await ui.unmount()
+})
+
+test('a TaskStop of Claude\'s that fails leaves the shell running', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  mock.env(on, { HOME: '/Users/test' })
+  host(on)
+  on('tool.call', { tool: 'Bash' }, () => ({ result: BACKGROUND }))
+  let isAllowed = false
+  on('tool.call', { tool: 'TaskStop' }, ($, e) =>
+    isAllowed ? { result: { message: 'stopped', task_id: e.task_id ?? '', task_type: 'shell' } } : { deny: 'The user declined' })
+  await $.session.start({ cwd: '/Users/test/proj', surface: null, isInteractive: false })
+  await $.tool.call({ tool: 'Bash', command: 'npm run dev', description: 'Start the dev server', run_in_background: true })
+  await $.tool.call({ tool: 'TaskStop', task_id: 'b1' })
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await shellKey(ui)).toBeDefined()
+  await ui.unmount()
+  isAllowed = true
+  await $.tool.call({ tool: 'TaskStop', task_id: 'b1' })
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await shellKey(ui)).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a background shell of this session is never timed out; a call that never came back is, after three hours', () => {
+  const hour = 60 * 60 * 1000
+  const at = 10 * hour
+  expect(isStale(job({ id: 'dev', taskId: 'b1', startedAt: 0 }), at)).toBe(false)
+  expect(isStale(job({ id: 'sub', taskId: 'b2', agentId: 'a1', startedAt: 0 }), at)).toBe(true)
+  expect(isStale(job({ id: 'lost', startedAt: 0 }), at)).toBe(true)
+  expect(isStale(job({ id: 'fresh', startedAt: at - hour }), at)).toBe(false)
+  expect(isStale(job({ id: 'done', startedAt: 0, endedAt: at - 60_000 }), at)).toBe(false)
+  expect(isStale(job({ id: 'old', startedAt: 0, endedAt: at - hour }), at)).toBe(true)
+  const list = [job({ id: 'dev', taskId: 'b1' }), job({ id: 'gone', taskId: 'b2' }), job({ id: 'sub', taskId: 'b3', agentId: 'a1' })]
+  expect(endGoneShells(list, new Set(['b1']), 5).map(j => j.endedAt)).toEqual([null, 5, null])
+})
+
+test('a background shell leaves the map once a Stop no longer lists it', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  mock.env(on, { HOME: '/Users/test' })
+  host(on)
+  on('tool.call', { tool: 'Bash' }, () => ({ result: BACKGROUND }))
+  await $.session.start({ cwd: '/Users/test/proj', surface: null, isInteractive: false })
+  await $.tool.call({ tool: 'Bash', command: 'npm run dev', description: 'Start the dev server', run_in_background: true })
+
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: [{ id: 'b1', type: 'shell', status: 'running', description: 'Start the dev server', command: 'npm run dev' }] })
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await shellKey(ui)).toBeDefined()
+  await ui.unmount()
+
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: [] })
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await shellKey(ui)).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a stop reads as refused, already ended, or done; a deny is always a refusal', () => {
+  expect(stopOutcomeOf({ text: 'stopped' })).toEqual({ kind: 'stopped' })
+  expect(stopOutcomeOf({ deny: 'The user declined' })).toEqual({ kind: 'refused', why: 'The user declined' })
+  expect(stopOutcomeOf({ deny: 'No such task' })).toEqual({ kind: 'refused', why: 'No such task' })
+  expect(stopOutcomeOf({ deny: '' })).toEqual({ kind: 'refused', why: 'refused' })
+  expect(stopOutcomeOf({ isError: true, text: '<tool_use_error>Task b1 is not running (status: completed)</tool_use_error>' })).toEqual({ kind: 'gone' })
+  expect(stopOutcomeOf({ isError: true, text: 'No task found with ID: b1' })).toEqual({ kind: 'gone' })
+  expect(stopOutcomeOf({ isError: true, text: '<tool_use_error>kill failed: EPERM</tool_use_error>' })).toEqual({ kind: 'refused', why: 'kill failed: EPERM' })
+  expect(stopOutcomeOf({ isError: true })).toEqual({ kind: 'refused', why: 'the tool reported an error' })
+})
+
+test('stopping a shell that had already ended takes it off the map and says so; so does Claude\'s own TaskStop', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  mock.env(on, { HOME: '/Users/test' })
+  host(on)
+  const toasts: string[] = []
+  on('ui.toast', ($, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  let n = 0
+  on('tool.call', { tool: 'Bash' }, () => ({ result: { ...BACKGROUND, backgroundTaskId: `b${(n += 1)}` } }))
+  on('tool.call', { tool: 'TaskStop' }, ($, e) => ({ isError: true as const, result: undefined, text: `<tool_use_error>Task ${e.task_id ?? ''} is not running (status: completed)</tool_use_error>` }))
+  await $.session.start({ cwd: '/Users/test/proj', surface: null, isInteractive: false })
+  await $.tool.call({ tool: 'Bash', command: 'npm run dev', description: 'Start the dev server', run_in_background: true })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const key = String(await shellKey(ui))
+  await ui.press({ key })
+  const stopKey = `job-stop:${key.replace(/^node:self:/, '')}`
+  await ui.press({ key: stopKey })
+  await ui.press({ key: stopKey })
+  await clock.settle()
+  expect(await shellKey(ui)).toBeUndefined()
+  expect(toasts).toContain('That shell had already ended.')
+  await ui.unmount()
+
+  await $.tool.call({ tool: 'Bash', command: 'npm run watch', description: 'Watch the files', run_in_background: true })
+  await $.tool.call({ tool: 'TaskStop', task_id: 'b2' })
+  const after = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await shellKey(after)).toBeUndefined()
+  await after.unmount()
+})
+
+test('a self-paced loop whose next run is not booked yet is not claimed stopped', async ($, on) => {
+  const clock = mock.clock(on, { now: at(9, 0) })
+  mock.env(on, { HOME: '/Users/test' })
+  host(on)
+  const toasts: string[] = []
+  on('ui.toast', ($, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  const deleted: string[] = []
+  on('tool.call', { tool: 'CronDelete' }, ($, e) => {
+    deleted.push(e.id)
+    return { result: { id: e.id } }
+  })
+  on('tool.call', { tool: 'ScheduleWakeup' }, () => ({ result: { scheduledFor: at(9, 20), clampedDelaySeconds: 1200, wasClamped: false } }))
+  await $.session.start({ cwd: '/Users/test/proj', surface: null, isInteractive: false })
+  await $.tool.call({ tool: 'ScheduleWakeup', delaySeconds: 1200, reason: 'watching CI run', prompt: '/loop watch CI' })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const loopKey = String((await ui.findAll({ type: 'Button' })).find(b => String(b.key).startsWith('node:self:loop:'))?.key)
+  await ui.press({ key: loopKey })
+  const stopKey = String((await ui.findAll({ type: 'Button' })).find(b => String(b.key).startsWith('loop-stop:'))?.key)
+  await ui.press({ key: stopKey })
+  await ui.press({ key: stopKey })
+  await clock.settle()
+  expect(deleted).toEqual([])
+  expect(await ui.find({ key: loopKey })).toBeDefined()
+  expect(toasts.some(t => /^Could not stop the loop yet/.test(t))).toBe(true)
+  await ui.unmount()
+})
+
+test('recording mode hides a hidden word everywhere the pane draws it, toasts included', async ($, on) => {
+  const clock = mock.clock(on, { now: at(9, 0) })
+  mock.env(on, { HOME: '/Users/test', CLAUDE_MODS_RECORDING: '1', CLAUDE_MODS_RECORDING_TERMS: JSON.stringify(['falcon']) })
+  host(on)
+  const toasts: string[] = []
+  on('ui.toast', ($, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  on('tool.call', { tool: 'Bash' }, () => ({ result: BACKGROUND }))
+  on('tool.call', { tool: 'TaskStop' }, () => ({ deny: 'falcon is protected' }))
+  on('tool.call', { tool: 'ScheduleWakeup' }, () => ({ result: { scheduledFor: at(9, 20), clampedDelaySeconds: 1200, wasClamped: false } }))
+  await $.session.start({ cwd: '/Users/test/falcon-site', surface: null, isInteractive: false })
+  await $.tool.call({ tool: 'Bash', command: 'npm run dev', description: 'Serve falcon', run_in_background: true })
+  await $.tool.call({ tool: 'ScheduleWakeup', delaySeconds: 1200, reason: 'watching falcon deploy', prompt: '/loop watch falcon' })
+  await $.classic.Stop({ stop_hook_active: false, session_crons: [{ id: 'w1', schedule: '20 9 12 10 *', recurring: false, prompt: '/loop watch falcon' }] })
+  await clock.settle()
+
+  const leaks = async (ui: { find: (q: { type: string; text: RegExp }) => Promise<unknown>; findAll: (q: { type: string }) => Promise<{ props: Record<string, unknown> }[]> }): Promise<string[]> => [
+    ...((await ui.find({ type: 'Text', text: /falcon/i })) === undefined ? [] : ['a Text']),
+    ...(await ui.findAll({ type: 'Button' })).map(b => String(b.props.label ?? '')).filter(l => /falcon/i.test(l)),
+    ...(await ui.findAll({ type: 'Svg' })).map(x => String(x.props.source ?? '')).filter(x => /falcon/i.test(x)).map(() => 'the drawing'),
+  ]
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    expect(await leaks(ui)).toEqual([])
+    for (const prefix of ['node:self:loop:', 'node:self:job:', 'session:']) {
+      const key = (await ui.findAll({ type: 'Button' })).map(b => String(b.key)).find(k => k.startsWith(prefix))
+      if (key === undefined) continue
+      await ui.press({ key })
+      expect(await leaks(ui)).toEqual([])
+      await ui.press({ key: 'peek-close' }).catch(() => undefined)
+    }
+    await ui.unmount()
+  }
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const key = String(await shellKey(ui))
+  await ui.press({ key })
+  const stopKey = `job-stop:${key.replace(/^node:self:/, '')}`
+  await ui.press({ key: stopKey })
+  await ui.press({ key: stopKey })
+  await clock.settle()
+  expect(toasts.some(t => t.startsWith('Could not stop the shell: [hidden] is protected'))).toBe(true)
+  expect(toasts.some(t => /falcon/i.test(t))).toBe(false)
+  await ui.unmount()
+})
+
+test('the pane opens itself beside a fullscreen transcript, once', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  mock.env(on, { HOME: '/Users/test' })
+  host(on)
+  const opened: string[] = []
+  on('ui.open', ($, e) => {
+    opened.push(e.id)
+    return { value: { isPlaced: true } }
+  })
+  on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
+    const { Box } = $.ui.resolve(e)
+    return <Box />
+  })
+  await $.session.start({ cwd: '/Users/test/proj', surface: null, isInteractive: true })
+  for (let i = 0; i < 2; i += 1) {
+    const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    await band.unmount()
+  }
+  expect(opened).toEqual(['ringside'])
+})
+
+test('on the main screen (tmux\'s default) the pane does not open itself above the prompt', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  mock.env(on, { HOME: '/Users/test' })
+  host(on)
+  const opened: string[] = []
+  on('ui.open', ($, e) => {
+    opened.push(e.id)
+    return { value: { isPlaced: true } }
+  })
+  on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
+    const { Box } = $.ui.resolve(e)
+    return <Box />
+  })
+  await $.session.start({ cwd: '/Users/test/proj', surface: null, isInteractive: true })
+  const band = await $.ui.mount({ ...BAND, viewport: { ...BAND.viewport, isFullscreen: false }, surface: 'terminal' })
+  await band.unmount()
+  expect(opened).toEqual([])
+})
+
+test('without AppleScript (Linux), Jump shows the pane in its tmux window, and says a new window needs macOS', async ($, on) => {
+  const now = 3_000_000
+  const clock = mock.clock(on, { now })
+  mock.env(on, { HOME: '/home/test' })
+  host(on, { process: false, mac: false })
+  on('ui.toast', () => ({ value: undefined }))
+  const ran: string[][] = []
+  on('process.run', ($, e) => {
+    ran.push([...e.argv])
+    const [bin = '', verb = ''] = e.argv
+    const stdout = bin !== 'tmux' ? '' : verb === '-V' ? 'tmux 3.4\n' : verb === 'list-panes' ? '/dev/pts/4\twork\t@1\t%3\n' : verb === 'list-clients' ? '/dev/pts/1\n' : ''
+    return { value: { exitCode: bin === 'tmux' ? 0 : 128, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  const rows = [
+    session({ sessionId: 'self-id', isSelf: true, since: now - 1_000 }),
+    session({ sessionId: 'a-id', name: 'alpha', cwd: '/home/test/alpha', tty: '/dev/pts/4', since: now - 60_000 }),
+    session({ sessionId: 'bg-new', jobId: 'job-new', name: 'fresh audit', tty: null, pid: null, state: 'done', since: now - 60 * 60_000 }),
+  ]
+  on('state.get', { plugin: 'sessions', key: 'rows' } as never, () => ({ value: { value: rows, version: 1 } }))
+  on('state.get', { plugin: 'sessions', key: 'hidden' } as never, () => ({ value: { value: [], version: 1 } }))
+  await $.session.start({ cwd: '/home/test/proj', surface: null, isInteractive: false })
+  await clock.settle()
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'session:a-id' })
+  await ui.press({ key: 'jump:a-id' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /^✓ Showed alpha's pane in its tmux window/ })).toBeDefined()
+  expect(ran).toContainEqual(['tmux', 'select-pane', '-t', '%3'])
+  expect(ran.some(argv => argv[0] === '/usr/bin/osascript')).toBe(false)
+
+  await ui.press({ key: 'session:bg-new' })
+  await ui.press({ key: 'jump:bg-new' })
+  await clock.settle()
+  const said = (await ui.findAll({ type: 'Text' })).map(t => String(t.text ?? '')).join(' ').replace(/\s+/g, ' ')
+  expect(said).toMatch(/✗ Could not bring fresh audit forward: opening a new terminal window works on macOS only/)
+  await ui.unmount()
+})
+
+test('[to prompt] puts its words in at the cursor and keeps what the person had typed', async ($, on) => {
+  const clock = mock.clock(on, { now: 200_000 })
+  mock.env(on, { HOME: '/Users/test' })
+  host(on)
+  on('session.messages', () => ({ value: [] }))
+  const fills: { text: string; mode: string }[] = []
+  on('prompt.fill', ($, e) => {
+    fills.push({ text: e.text, mode: e.mode })
+    return { isFilled: true }
+  })
+  await $.session.start({ cwd: '/Users/test/proj', surface: null, isInteractive: false })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'tab:launch' })
+  await ui.press({ key: 'run:agent:Explore' })
+  await ui.press({ key: 'launch-fill' })
+  expect(fills).toEqual([{ text: 'Use the Explore agent to ', mode: 'insert' }])
+  await ui.unmount()
+})
+
+// The Buttons a pane draws whose key starts with `prefix`, by key.
+async function buttonsFrom(ui: { findAll: (q: { type: string }) => Promise<{ key: unknown; props: Record<string, unknown> }[]> }, prefix: string): Promise<{ key: string; label: string }[]> {
+  return (await ui.findAll({ type: 'Button' })).filter(b => String(b.key).startsWith(prefix)).map(b => ({ key: String(b.key), label: String(b.props.label ?? '') }))
+}
+
+const DB_QUESTION = {
+  question: 'Which database?', header: 'DB', multiSelect: false,
+  options: [{ label: 'Postgres', description: 'Relational, runs anywhere' }, { label: 'SQLite', description: 'One file, no server' }],
+}
+
+test("Claude's question shows its choices as cards; a press answers it in place of the dialog", async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  mock.env(on, { HOME: '/Users/test' })
+  host(on)
+  // The dialog waits on the person until the pane answers.
+  on('tool.call', { tool: 'AskUserQuestion' }, () => new Promise(() => undefined))
+  await $.session.start({ cwd: '/Users/test/proj', surface: null, isInteractive: false })
+  const asking = $.tool.call({ tool: 'AskUserQuestion', questions: [DB_QUESTION] })
+  await clock.settle()
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const cards = await buttonsFrom(ui, 'pick:need:')
+  expect(cards.map(c => c.label)).toEqual(['1. Postgres', '2. SQLite'])
+  expect(await ui.find({ type: 'Text', text: 'One file, no server' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Press one to answer, or answer in the dialog/ })).toBeDefined()
+  // A press the moment the cards appear may have been aimed at a row they pushed down: it does not answer.
+  await ui.press({ key: cards[1]?.key ?? '' })
+  expect((await buttonsFrom(ui, 'pick:need:')).length).toBe(2)
+  await clock.advance(1_000)
+  await ui.press({ key: cards[1]?.key ?? '' })
+  const ran = await asking
+  expect((ran as { result?: unknown }).result).toEqual({ questions: [DB_QUESTION], answers: { 'Which database?': 'SQLite' } })
+  await clock.settle()
+  expect(await buttonsFrom(ui, 'pick:need:')).toEqual([])
+  expect(await ui.find({ type: 'Text', text: 'NEEDS YOU' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('several questions, or a pick-any one, are answered card by card, then sent together', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  mock.env(on, { HOME: '/Users/test' })
+  host(on)
+  on('tool.call', { tool: 'AskUserQuestion' }, () => new Promise(() => undefined))
+  await $.session.start({ cwd: '/Users/test/proj', surface: null, isInteractive: false })
+  const checks = { question: 'Which checks run?', header: 'Checks', multiSelect: true, options: [{ label: 'Lint', description: '' }, { label: 'Types', description: '' }, { label: 'Tests', description: '' }] }
+  const asking = $.tool.call({ tool: 'AskUserQuestion', questions: [DB_QUESTION, checks] })
+  await clock.settle()
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /Which checks run\?/ })).toBeDefined()
+  const send = (await buttonsFrom(ui, 'send:need:'))[0]
+  expect(send?.label).toBe('Send answers')
+  const byLabel = async (label: string): Promise<string> => (await buttonsFrom(ui, 'pick:need:')).find(c => c.label.endsWith(label))?.key ?? ''
+  await clock.advance(1_000)
+  await ui.press({ key: await byLabel('Postgres') })
+  await ui.press({ key: await byLabel('Lint') })
+  await ui.press({ key: await byLabel('Tests') })
+  await ui.press({ key: await byLabel('Lint') })
+  expect((await buttonsFrom(ui, 'pick:need:')).map(c => c.label)).toEqual(['✓ Postgres', '2. SQLite', '1. Lint', '2. Types', '✓ Tests'])
+  await ui.press({ key: send?.key ?? '' })
+  const ran = await asking
+  expect((ran as { result?: { answers?: unknown } }).result?.answers).toEqual({ 'Which database?': 'Postgres', 'Which checks run?': 'Tests' })
+  await ui.unmount()
+})
+
+test("the choices Claude's answer ends on are cards; a press puts one in the prompt, keeping the draft", async ($, on) => {
+  const clock = mock.clock(on, { now: 50_000 })
+  mock.env(on, { HOME: '/Users/test' })
+  host(on)
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
+  on('turn.complete', ($, e) => ({ text: e.answer }))
+  const fills: { text: string; mode: string }[] = []
+  on('prompt.fill', ($, e) => {
+    fills.push({ text: e.text, mode: e.mode })
+    return { isFilled: true }
+  })
+  await $.session.start({ cwd: '/Users/test/proj', surface: null, isInteractive: false })
+  await $.turn.start({ text: 'what next', turnId: 't1' })
+  await $.turn.complete({
+    answer: 'The fixes are in.\n\nWhich should I do first?\n\n1. **Fix the band**: keep it quiet\n2. **Merge now** — ship 0.9.1',
+    durationMs: 10, isAborted: false, turnId: 't1', reason: 'answer', usage: undefined,
+  })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /Reply: Which should I do first\?/ })).toBeDefined()
+  const cards = await buttonsFrom(ui, 'pick:need:reply:')
+  expect(cards.map(c => c.label)).toEqual(['1. Fix the band', '2. Merge now'])
+  expect(await ui.find({ type: 'Text', text: 'keep it quiet' })).toBeDefined()
+  await ui.press({ key: cards[1]?.key ?? '' })
+  expect(fills).toEqual([{ text: 'Merge now', mode: 'insert' }])
+  await ui.unmount()
+})
+
+test("another session's choices show as cards that jump there; its closing question stays out of the band", async ($, on) => {
+  const start = 5_000_000
+  const clock = mock.clock(on, { now: start })
+  mock.env(on, { HOME })
+  host(on, { fs: false })
+  on('ui.toast', () => ({ value: undefined }))
+  on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
+    const { Box } = $.ui.resolve(e)
+    return <Box />
+  })
+  const files = new Map<string, string>()
+  const asks = [{ question: 'Which database?', header: 'DB', choices: [{ label: 'Postgres', detail: 'Relational' }, { label: 'SQLite', detail: 'One file' }], isMulti: false }]
+  files.set(`${DIR}/asker.json`, boardFile({ sessionId: 'asker', name: 'api-fix', state: 'needs', doing: 'Which database?', heartbeatAt: start, needKind: 'ask', asks }))
+  files.set(`${DIR}/replier.json`, boardFile({
+    sessionId: 'replier', name: 'docs', state: 'needs', doing: 'Reply: Want me to push?', heartbeatAt: start, needKind: 'reply',
+    asks: [{ question: 'Want me to push?', header: '', choices: [{ label: 'Yes', detail: 'Push' }, { label: 'No', detail: '' }], isMulti: false }],
+  }))
+  memFs(on, files, () => start)
+  await $.session.start({ cwd: '/Users/test/proj', surface: null, isInteractive: false })
+  await clock.advance(5_000)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await buttonsFrom(ui, 'pick:need:session:asker')).map(c => c.label)).toEqual(['1. Postgres', '2. SQLite'])
+  expect((await buttonsFrom(ui, 'pick:need:session:replier')).map(c => c.label)).toEqual(['1. Yes', '2. No'])
+  expect(await ui.find({ type: 'Text', text: /Jump there to answer/ })).toBeDefined()
+  await ui.unmount()
+
+  let band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: /api-fix: Which database\?/ })).toBeDefined()
+  await band.unmount()
+  // With only the closing question left, the band says nothing.
+  files.delete(`${DIR}/asker.json`)
+  await clock.advance(5_000)
+  band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: 'Waiting on you' })).toBeUndefined()
+  await band.unmount()
+})
+
+test('what a session waits on goes out with its choices, so the other maps can draw them', () => {
+  const replyAsk = { question: 'Ship it?', header: '', choices: [{ label: 'Yes', detail: '' }, { label: 'No', detail: '' }], isMulti: false }
+  expect(presenceOf({ ...IDLE, reply: 'Ship it?', replyAsk }, [], { startedAt: null, tasks: [] }, [])).toEqual({ state: 'needs', doing: 'Reply: Ship it?', needKind: 'reply', asks: [replyAsk] })
+  const asking = job({ id: 'q1', tool: 'AskUserQuestion', need: { kind: 'question', text: 'Which database?', asks: [{ question: 'Which database?', header: 'DB', choices: [{ label: 'Postgres', detail: '' }], isMulti: false }] } })
+  expect(presenceOf(IDLE, [asking], { startedAt: null, tasks: [] }, []).needKind).toBe('ask')
+})
+
+test("Ringside's folder is made private and keeps a week of board files, touching nothing outside it", async ($, on) => {
+  const start = 5_000_000
+  const clock = mock.clock(on, { now: start })
+  mock.env(on, { HOME })
+  host(on, { fs: false, process: false })
+  const files = new Map<string, string>([[`${DIR}/peer.json`, boardFile({ sessionId: 'peer', heartbeatAt: start })]])
+  memFs(on, files, () => start)
+  const ran: string[][] = []
+  on('process.run', ($, e) => {
+    ran.push([...e.argv])
+    return { value: { exitCode: e.argv[0] === 'git' ? 128 : 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  await $.session.start({ cwd: '/Users/test/proj', surface: null, isInteractive: false })
+  await clock.settle()
+  const dir = `${HOME}/.claude/mods-data/ringside`
+  expect(ran).toContainEqual(['chmod', '700', dir])
+  expect(ran).toContainEqual(['find', `${dir}/hub`, '-type', 'f', '-name', '*.json', '-mtime', '+7', '-delete'])
+  expect(ran).toContainEqual(['find', `${dir}/hub`, '-mindepth', '1', '-type', 'd', '-empty', '-delete'])
+  const paths = ran.filter(a => a[0] === 'find' || a[0] === 'chmod').flatMap(a => a.filter(x => x.startsWith('/')))
+  expect(paths.length).toBe(3)
+  expect(paths.every(p => p.startsWith(dir))).toBe(true)
+})
+
+test('with CLAUDE_CONFIG_DIR set, the folder kept tidy is the one under it; with no home known, nothing is touched', async ($, on) => {
+  const start = 5_000_000
+  const clock = mock.clock(on, { now: start })
+  const alt = '/Users/test/alt-config'
+  mock.env(on, { HOME, CLAUDE_CONFIG_DIR: alt })
+  host(on, { fs: false, process: false })
+  const files = new Map<string, string>([[`${alt}/mods-data/ringside/hub/-Users-test-proj/peer.json`, boardFile({ sessionId: 'peer', heartbeatAt: start })]])
+  memFs(on, files, () => start)
+  const ran: string[][] = []
+  on('process.run', ($, e) => {
+    ran.push([...e.argv])
+    return { value: { exitCode: e.argv[0] === 'git' ? 128 : 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  await $.session.start({ cwd: '/Users/test/proj', surface: null, isInteractive: false })
+  await clock.settle()
+  expect(ran).toContainEqual(['chmod', '700', `${alt}/mods-data/ringside`])
+  expect(ran.some(a => a.includes(`${HOME}/.claude/mods-data/ringside`))).toBe(false)
+})
+
+test('with no home folder known, Ringside runs no chmod or find at all', async ($, on) => {
+  const clock = mock.clock(on, { now: 5_000_000 })
+  mock.env(on, {})
+  host(on, { process: false })
+  const ran: string[][] = []
+  on('process.run', ($, e) => {
+    ran.push([...e.argv])
+    return { value: { exitCode: 128, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  await $.session.start({ cwd: '/Users/test/proj', surface: null, isInteractive: false })
+  await clock.settle()
+  expect(ran.filter(a => a[0] === 'chmod' || a[0] === 'find')).toEqual([])
+})
+
+test('when the dialog is answered first, its answer stands and the cards go', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  mock.env(on, { HOME: '/Users/test' })
+  host(on)
+  on('tool.call', { tool: 'AskUserQuestion' }, async () => {
+    await clock.sleep(2_000)
+    return { result: { questions: [DB_QUESTION], answers: { 'Which database?': 'Postgres' } } }
+  })
+  await $.session.start({ cwd: '/Users/test/proj', surface: null, isInteractive: false })
+  const asking = $.tool.call({ tool: 'AskUserQuestion', questions: [DB_QUESTION] })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await buttonsFrom(ui, 'pick:need:')).length).toBe(2)
+  await clock.advance(2_500)
+  const ran = await asking
+  expect((ran as { result?: { answers?: unknown } }).result?.answers).toEqual({ 'Which database?': 'Postgres' })
+  expect(await buttonsFrom(ui, 'pick:need:')).toEqual([])
+  await ui.unmount()
+})
+
+test('an answer from a card uses the question and the option as Claude wrote them', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  mock.env(on, { HOME: '/Users/test' })
+  host(on)
+  on('tool.call', { tool: 'AskUserQuestion' }, () => new Promise(() => undefined))
+  await $.session.start({ cwd: '/Users/test/proj', surface: null, isInteractive: false })
+  const long = `Keep ${'every old migration '.repeat(6)}as it is`
+  const asking = $.tool.call({ tool: 'AskUserQuestion', questions: [{ question: 'Which  migration\nplan?', header: 'Plan', multiSelect: false, options: [{ label: long, description: '' }, { label: 'Squash', description: '' }] }] })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await clock.advance(1_000)
+  await ui.press({ key: (await buttonsFrom(ui, 'pick:need:'))[0]?.key ?? '' })
+  const ran = await asking
+  expect((ran as { result?: { answers?: unknown } }).result?.answers).toEqual({ 'Which  migration\nplan?': long })
+  await ui.unmount()
+})
+
+test("pressing another session's card jumps there and answers nothing", async ($, on) => {
+  const start = 5_000_000
+  const clock = mock.clock(on, { now: start })
+  mock.env(on, { HOME })
+  host(on, { fs: false })
+  const toasts: string[] = []
+  on('ui.toast', ($, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  const files = new Map<string, string>()
+  const asks = [{ question: 'Which database?', header: 'DB', choices: [{ label: 'Postgres', detail: '' }, { label: 'SQLite', detail: '' }], isMulti: false }]
+  files.set(`${DIR}/asker.json`, boardFile({ sessionId: 'asker', name: 'api-fix', state: 'needs', doing: 'Which database?', heartbeatAt: start, needKind: 'ask', asks }))
+  memFs(on, files, () => start)
+  await $.session.start({ cwd: '/Users/test/proj', surface: null, isInteractive: false })
+  await clock.advance(5_000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: (await buttonsFrom(ui, 'pick:need:session:asker'))[0]?.key ?? '' })
+  await clock.settle()
+  // Not in this computer's session list, so the jump says it could not: a jump, not an answer.
+  expect(toasts.some(t => t.startsWith('Could not bring'))).toBe(true)
+  await ui.unmount()
+})
+
+test("a Peek left open on a subagent that then finishes shows its last steps", async ($, on) => {
+  const clock = mock.clock(on, { now: 70_000 })
+  mock.env(on, { HOME: '/Users/test' })
+  host(on, { agents: false })
+  let status: 'running' | 'completed' = 'running'
+  on('agent.list', () => ({ value: [{ id: 'a1', type: 'Explore', description: 'find auth', status }] }))
+  const steps: { tool_use_id: string; tool: string; input: Record<string, unknown>; result?: unknown }[] = [{ tool_use_id: 't1', tool: 'Grep', input: { pattern: 'session' }, result: 'x' }]
+  on('session.messages', () => ({ value: [{ role: 'user' as const, text: 'Find where login is checked', toolUses: [] }, { role: 'assistant' as const, text: '', toolUses: [...steps] }] }))
+  await $.session.start({ cwd: '/p', surface: null, isInteractive: false })
+  await clock.advance(2_000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'agent:a1' })
+  expect(await ui.find({ type: 'Text', text: /Grep session/ })).toBeDefined()
+  // The map sees it finish before its last step is read.
+  status = 'completed'
+  await clock.advance(2_000)
+  steps.push({ tool_use_id: 't2', tool: 'Read', input: { file_path: '/p/middleware.ts' }, result: 'y' })
+  await clock.advance(10_000)
+  expect(await ui.find({ type: 'Text', text: /Read middleware\.ts/ })).toBeDefined()
   await ui.unmount()
 })

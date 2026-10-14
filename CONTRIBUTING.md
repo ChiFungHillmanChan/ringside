@@ -52,7 +52,7 @@ claude plugin enable ringside@ringside
 | `hooks/loops.ts` | `/loop` schedules and self-paced loops |
 | `types/index.d.ts` | The shape of every value Ringside keeps in Claude Code's state |
 | `tests/` | Tests run by `claude plugin test` |
-| `media/` | The README's GIF and screenshots |
+| `media` branch | The README's GIF and screenshots, kept apart so installs do not copy them |
 
 ## Run the checks
 

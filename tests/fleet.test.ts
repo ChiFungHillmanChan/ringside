@@ -50,8 +50,9 @@ test("the sessions mod's rows are taken only in the shape this mod knows", () =>
 })
 
 test('the tmux pane on a terminal is found by its tty', () => {
-  const out = '/dev/ttys001 main @1 %1\n/dev/ttys004 work @3 %7\n'
+  const out = '/dev/ttys001\tmain\t@1\t%1\n/dev/ttys004\twork\t@3\t%7\n/dev/ttys005\tmy project\t@4\t%9\n'
   expect(tmuxPaneOn(out, '/dev/ttys004')).toEqual({ session: 'work', windowId: '@3', paneId: '%7' })
+  expect(tmuxPaneOn(out, '/dev/ttys005')).toEqual({ session: 'my project', windowId: '@4', paneId: '%9' })
   expect(tmuxPaneOn(out, '/dev/ttys099')).toBeNull()
   expect(shellQuote("it's")).toBe(`'it'\\''s'`)
 })
